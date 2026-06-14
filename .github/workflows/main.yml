@@ -1,4 +1,4 @@
-name: Build TileWords KUAL Extension
+name: Build TileWords for Kindle
 
 on:
   workflow_dispatch:
@@ -19,37 +19,20 @@ jobs:
       - name: Install host packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip wget ca-certificates make
+          sudo apt-get install -y \
+            build-essential ca-certificates curl wget tar zip \
+            meson ninja-build pkg-config python3
 
-      - name: Cache KindleHF toolchain
-        id: cache-toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/x-tools/arm-kindlehf-linux-gnueabihf
-          key: koxtoolchain-kindlehf-2025-05
-
-      - name: Download KindleHF toolchain
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: Build Kindle binary
         run: |
-          wget -q https://github.com/koreader/koxtoolchain/releases/download/2025.05/kindlehf.tar.gz -O /tmp/kindlehf.tar.gz
-          tar -xzf /tmp/kindlehf.tar.gz -C "$HOME"
-
-      - name: Add toolchain to PATH
-        run: |
-          echo "$HOME/x-tools/arm-kindlehf-linux-gnueabihf/bin" >> "$GITHUB_PATH"
-          ls "$HOME/x-tools/arm-kindlehf-linux-gnueabihf/bin"
-
-      - name: Build native binary
-        run: |
-          make clean
-          make CC=arm-kindlehf-linux-gnueabihf-gcc
+          bash ./scripts/build-kindlehf.sh
 
       - name: Package KUAL extension
         run: |
-          make package
+          bash ./scripts/package-kual.sh ./builddir_kindlehf/tilewords
           unzip -l dist/tilewords-kual.zip
 
-      - name: Upload release artifact
+      - name: Upload KUAL artifact
         uses: actions/upload-artifact@v4
         with:
           name: tilewords-kual
