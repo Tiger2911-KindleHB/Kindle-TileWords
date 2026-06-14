@@ -105,6 +105,7 @@ private:
     static gboolean on_draw(GtkWidget* widget, GdkEventExpose* event, gpointer data);
     static gboolean on_button(GtkWidget* widget, GdkEventButton* event, gpointer data);
     static gboolean on_delete(GtkWidget* widget, GdkEvent* event, gpointer data);
+    static gboolean on_raise_timer(gpointer data);
 
     void compute_layout(int w, int h);
     void draw(cairo_t* cr, int w, int h);
@@ -252,7 +253,14 @@ bool TileWordsApp::init(int argc, char** argv) {
     gtk_window_set_title(GTK_WINDOW(window_), "TileWords");
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
+    gtk_window_set_default_size(GTK_WINDOW(window_), gdk_screen_width(), gdk_screen_height());
+    gtk_window_move(GTK_WINDOW(window_), 0, 0);
     gtk_window_fullscreen(GTK_WINDOW(window_));
+    gtk_window_set_keep_above(GTK_WINDOW(window_), TRUE);
+    gtk_window_set_accept_focus(GTK_WINDOW(window_), TRUE);
+    gtk_window_set_focus_on_map(GTK_WINDOW(window_), TRUE);
+    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(window_), TRUE);
+    gtk_window_set_skip_pager_hint(GTK_WINDOW(window_), TRUE);
     gtk_widget_set_app_paintable(window_, TRUE);
     gtk_widget_set_double_buffered(window_, FALSE);
     gtk_widget_add_events(window_, static_cast<GdkEventMask>(
@@ -282,7 +290,12 @@ int TileWordsApp::run() {
     } else {
         app_log("input: missing gdk window after show");
     }
+    gtk_widget_grab_focus(window_);
+    g_timeout_add(250, TileWordsApp::on_raise_timer, this);
+    g_timeout_add(900, TileWordsApp::on_raise_timer, this);
+    g_timeout_add(1800, TileWordsApp::on_raise_timer, this);
     gtk_widget_queue_draw(window_);
+    app_log("run: scheduled foreground raise timers");
     app_log("run: enter gtk_main");
     gtk_main();
     app_log("run: gtk_main returned");
@@ -318,6 +331,24 @@ gboolean TileWordsApp::on_delete(GtkWidget*, GdkEvent*, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
     app->quit();
     return TRUE;
+}
+
+gboolean TileWordsApp::on_raise_timer(gpointer data) {
+    auto* app = static_cast<TileWordsApp*>(data);
+    if (!app || !app->window_) return FALSE;
+    app_log("focus: raise/present timer");
+    gtk_window_fullscreen(GTK_WINDOW(app->window_));
+    gtk_window_set_keep_above(GTK_WINDOW(app->window_), TRUE);
+    gtk_window_present(GTK_WINDOW(app->window_));
+    gtk_widget_grab_focus(app->window_);
+    GdkWindow* win = gtk_widget_get_window(app->window_);
+    if (win) {
+        gdk_window_show(win);
+        gdk_window_raise(win);
+        gdk_window_focus(win, GDK_CURRENT_TIME);
+    }
+    gtk_widget_queue_draw(app->window_);
+    return FALSE;
 }
 
 void TileWordsApp::compute_layout(int w, int h) {
