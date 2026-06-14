@@ -243,17 +243,21 @@ bool TileWordsApp::init(int argc, char** argv) {
     }
     app_log("constructor: after gtk_init");
 
-    window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    window_ = gtk_window_new(GTK_WINDOW_POPUP);
     if (!window_) {
         app_log("constructor: window creation failed");
         return false;
     }
-    app_log("constructor: window created");
+    app_log("constructor: popup window created");
 
     gtk_window_set_title(GTK_WINDOW(window_), "TileWords");
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
-    gtk_window_set_default_size(GTK_WINDOW(window_), gdk_screen_width(), gdk_screen_height());
+    int screen_w = gdk_screen_width();
+    int screen_h = gdk_screen_height();
+    gtk_widget_set_size_request(window_, screen_w, screen_h);
+    gtk_window_set_default_size(GTK_WINDOW(window_), screen_w, screen_h);
+    gtk_window_resize(GTK_WINDOW(window_), screen_w, screen_h);
     gtk_window_move(GTK_WINDOW(window_), 0, 0);
     gtk_window_fullscreen(GTK_WINDOW(window_));
     gtk_window_set_keep_above(GTK_WINDOW(window_), TRUE);
@@ -285,8 +289,12 @@ int TileWordsApp::run() {
     gtk_window_present(GTK_WINDOW(window_));
     GdkWindow* gdk_window = gtk_widget_get_window(window_);
     if (gdk_window) {
+        gdk_window_set_override_redirect(gdk_window, TRUE);
+        gdk_window_move_resize(gdk_window, 0, 0, gdk_screen_width(), gdk_screen_height());
+        gdk_window_show(gdk_window);
+        gdk_window_raise(gdk_window);
         gdk_window_set_events(gdk_window, static_cast<GdkEventMask>(gdk_window_get_events(gdk_window) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK));
-        app_log("input: configured single top-level window event mask");
+        app_log("input: configured popup override-redirect window event mask");
     } else {
         app_log("input: missing gdk window after show");
     }
@@ -343,6 +351,8 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
     gtk_widget_grab_focus(app->window_);
     GdkWindow* win = gtk_widget_get_window(app->window_);
     if (win) {
+        gdk_window_set_override_redirect(win, TRUE);
+        gdk_window_move_resize(win, 0, 0, gdk_screen_width(), gdk_screen_height());
         gdk_window_show(win);
         gdk_window_raise(win);
         gdk_window_focus(win, GDK_CURRENT_TIME);
