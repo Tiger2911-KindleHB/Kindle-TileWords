@@ -9,12 +9,29 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <csignal>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 namespace {
+
+static std::string g_log_path;
+
+static void app_log(const std::string& msg) {
+    if (g_log_path.empty()) return;
+    std::ofstream f(g_log_path, std::ios::app);
+    if (f) f << std::time(nullptr) << " " << msg << "\n";
+}
+
+static void app_log_signal(int sig) {
+    if (!g_log_path.empty()) {
+        std::ofstream f(g_log_path, std::ios::app);
+        if (f) f << std::time(nullptr) << " fatal signal " << sig << "\n";
+    }
+    std::_Exit(128 + sig);
+}
 
 constexpr int BOARD_N = 15;
 constexpr int RACK_N = 7;
@@ -78,7 +95,6 @@ public:
 
 private:
     GtkWidget* window_ = nullptr;
-    GtkWidget* area_ = nullptr;
     Game game_;
     Layout layout_;
     std::set<std::string> dictionary_;
@@ -212,40 +228,80 @@ bool TileWordsApp::init(int argc, char** argv) {
     home_ = env_home && *env_home ? env_home : "/mnt/us/extensions/tilewords";
     save_path_ = home_ + "/data/save.json";
     dict_path_ = home_ + "/data/dictionary.txt";
+    g_log_path = home_ + "/data/app.log";
 
-    gtk_init(&argc, &argv);
+    std::signal(SIGSEGV, app_log_signal);
+    std::signal(SIGABRT, app_log_signal);
+    std::signal(SIGBUS, app_log_signal);
+    std::signal(SIGILL, app_log_signal);
+
+    app_log("constructor: before gtk_init");
+    if (!gtk_init_check(&argc, &argv)) {
+        app_log("constructor: gtk_init_check failed");
+        return false;
+    }
+    app_log("constructor: after gtk_init");
+
     window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    if (!window_) {
+        app_log("constructor: window creation failed");
+        return false;
+    }
+    app_log("constructor: window created");
+
     gtk_window_set_title(GTK_WINDOW(window_), "TileWords");
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_fullscreen(GTK_WINDOW(window_));
-    gtk_window_set_keep_above(GTK_WINDOW(window_), TRUE);
+    gtk_widget_set_app_paintable(window_, TRUE);
+    gtk_widget_set_double_buffered(window_, FALSE);
+    gtk_widget_add_events(window_, static_cast<GdkEventMask>(
+        GDK_EXPOSURE_MASK |
+        GDK_BUTTON_PRESS_MASK |
+        GDK_BUTTON_RELEASE_MASK |
+        GDK_POINTER_MOTION_MASK));
 
-    area_ = gtk_drawing_area_new();
-    gtk_widget_add_events(area_, GDK_BUTTON_PRESS_MASK);
-    gtk_container_add(GTK_CONTAINER(window_), area_);
-
-    g_signal_connect(G_OBJECT(area_), "expose-event", G_CALLBACK(TileWordsApp::on_draw), this);
-    g_signal_connect(G_OBJECT(area_), "button-press-event", G_CALLBACK(TileWordsApp::on_button), this);
+    g_signal_connect(G_OBJECT(window_), "expose-event", G_CALLBACK(TileWordsApp::on_draw), this);
+    g_signal_connect(G_OBJECT(window_), "button-press-event", G_CALLBACK(TileWordsApp::on_button), this);
     g_signal_connect(G_OBJECT(window_), "delete-event", G_CALLBACK(TileWordsApp::on_delete), this);
 
     load_dictionary();
     if (!load_game()) new_game(true);
 
-    gtk_widget_show_all(window_);
-    gtk_window_present(GTK_WINDOW(window_));
     return true;
 }
 
 int TileWordsApp::run() {
+    app_log("run: show window");
+    gtk_widget_show_all(window_);
+    gtk_window_present(GTK_WINDOW(window_));
+    GdkWindow* gdk_window = gtk_widget_get_window(window_);
+    if (gdk_window) {
+        gdk_window_set_events(gdk_window, static_cast<GdkEventMask>(gdk_window_get_events(gdk_window) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK));
+        app_log("input: configured single top-level window event mask");
+    } else {
+        app_log("input: missing gdk window after show");
+    }
+    gtk_widget_queue_draw(window_);
+    app_log("run: enter gtk_main");
     gtk_main();
+    app_log("run: gtk_main returned");
     return 0;
 }
 
 gboolean TileWordsApp::on_draw(GtkWidget* widget, GdkEventExpose*, gpointer data) {
+    static bool first = true;
     auto* app = static_cast<TileWordsApp*>(data);
-    cairo_t* cr = gdk_cairo_create(gtk_widget_get_window(widget));
+    GdkWindow* win = gtk_widget_get_window(widget);
+    if (!win) { app_log("draw: missing gdk window"); return TRUE; }
+    cairo_t* cr = gdk_cairo_create(win);
     GtkAllocation alloc;
     gtk_widget_get_allocation(widget, &alloc);
+    if (alloc.width <= 0 || alloc.height <= 0) {
+        alloc.width = gdk_screen_width();
+        alloc.height = gdk_screen_height();
+    }
+    if (first) { app_log("draw: first expose"); first = false; }
     app->compute_layout(alloc.width, alloc.height);
     app->draw(cr, alloc.width, alloc.height);
     cairo_destroy(cr);
@@ -519,7 +575,7 @@ void TileWordsApp::touch_exchange(int x, int y) {
 
 void TileWordsApp::touch_blank_select(int x, int y) {
     GtkAllocation alloc;
-    gtk_widget_get_allocation(area_, &alloc);
+    gtk_widget_get_allocation(window_, &alloc);
     int w = alloc.width, h = alloc.height;
     Rect box{w / 14, h / 5, w * 6 / 7, h * 3 / 5};
     int cols = 7;
@@ -548,10 +604,11 @@ void TileWordsApp::touch_confirm_new(int x, int y) {
 }
 
 void TileWordsApp::queue_draw() {
-    if (area_) gtk_widget_queue_draw(area_);
+    if (window_) gtk_widget_queue_draw(window_);
 }
 
 void TileWordsApp::quit() {
+    app_log("quit: save and gtk_main_quit");
     save_game();
     gtk_main_quit();
 }
