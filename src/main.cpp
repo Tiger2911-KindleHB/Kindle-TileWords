@@ -1,5 +1,6 @@
 #include <gtk/gtk.h>
 #include <cairo.h>
+#include "kindle_gtk_runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -213,6 +214,12 @@ bool TileWordsApp::init(int argc, char** argv) {
     save_path_ = home_ + "/data/save.json";
     dict_path_ = home_ + "/data/dictionary.txt";
 
+    char gtk_error[512] = {0};
+    if (!tw_load_gtk_runtime(gtk_error, sizeof(gtk_error))) {
+        std::fprintf(stderr, "TileWords GTK runtime error: %s\n", gtk_error);
+        return false;
+    }
+
     gtk_init(&argc, &argv);
     window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window_), "TileWords");
@@ -243,7 +250,7 @@ int TileWordsApp::run() {
 
 gboolean TileWordsApp::on_draw(GtkWidget* widget, GdkEventExpose*, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
-    cairo_t* cr = gdk_cairo_create(widget->window);
+    cairo_t* cr = gdk_cairo_create(gtk_widget_get_window(widget));
     GtkAllocation alloc;
     gtk_widget_get_allocation(widget, &alloc);
     app->compute_layout(alloc.width, alloc.height);
