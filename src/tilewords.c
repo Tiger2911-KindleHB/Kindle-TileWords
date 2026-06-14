@@ -9,6 +9,7 @@
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <stdbool.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +68,43 @@ typedef struct {
     int w, h, bpp, stride;
 } FB;
 
+
+// Kindle EPDC refresh ioctl. Writing /dev/fb0 is not enough on many Kindle builds;
+// the E Ink controller must be told to update the panel.
+#define TW_UPDATE_MODE_PARTIAL 0u
+#define TW_UPDATE_MODE_FULL 1u
+#define TW_WAVEFORM_MODE_GC16 2u
+#define TW_WAVEFORM_MODE_AUTO 257u
+#define TW_MXCFB_SEND_UPDATE _IOW('F', 0x2E, struct tw_mxcfb_update_data)
+
+typedef struct {
+    uint32_t top;
+    uint32_t left;
+    uint32_t width;
+    uint32_t height;
+} TwMxcfbRect;
+
+typedef struct {
+    uint32_t phys_addr;
+    uint32_t width;
+    uint32_t height;
+    TwMxcfbRect alt_update_region;
+} TwMxcfbAltBufferData;
+
+typedef struct tw_mxcfb_update_data {
+    TwMxcfbRect update_region;
+    uint32_t waveform_mode;
+    uint32_t update_mode;
+    uint32_t update_marker;
+    int temp;
+    unsigned int flags;
+    TwMxcfbAltBufferData alt_buffer_data;
+} TwMxcfbUpdateData;
+
 static FB g_fb;
+static volatile sig_atomic_t g_running = 1;
+static int g_touch_fd = -1;
+static bool g_touch_grabbed = false;
 
 static int fb_open(FB *fb) {
     memset(fb, 0, sizeof(*fb));
@@ -85,9 +122,48 @@ static int fb_open(FB *fb) {
     return 0;
 }
 
+static void release_touch(void) {
+    if (g_touch_fd >= 0) {
+        if (g_touch_grabbed) ioctl(g_touch_fd, EVIOCGRAB, 0);
+        close(g_touch_fd);
+        g_touch_fd = -1;
+        g_touch_grabbed = false;
+    }
+}
+
 static void fb_close(FB *fb) {
-    if (fb->mem && fb->mem != MAP_FAILED) munmap(fb->mem, fb->screensize);
-    if (fb->fd >= 0) close(fb->fd);
+    release_touch();
+    if (fb->mem && fb->mem != MAP_FAILED) {
+        munmap(fb->mem, fb->screensize);
+        fb->mem = NULL;
+    }
+    if (fb->fd >= 0) {
+        close(fb->fd);
+        fb->fd = -1;
+    }
+}
+
+static void fb_refresh(bool full) {
+    static uint32_t marker = 1;
+    static bool first_refresh = true;
+    bool use_full = full || first_refresh;
+    first_refresh = false;
+
+    TwMxcfbUpdateData upd;
+    memset(&upd, 0, sizeof(upd));
+    upd.update_region.left = 0;
+    upd.update_region.top = 0;
+    upd.update_region.width = (uint32_t)g_fb.w;
+    upd.update_region.height = (uint32_t)g_fb.h;
+    upd.waveform_mode = use_full ? TW_WAVEFORM_MODE_GC16 : TW_WAVEFORM_MODE_AUTO;
+    upd.update_mode = use_full ? TW_UPDATE_MODE_FULL : TW_UPDATE_MODE_PARTIAL;
+    upd.update_marker = marker++;
+    upd.temp = 0;
+    upd.flags = 0;
+
+    if (ioctl(g_fb.fd, TW_MXCFB_SEND_UPDATE, &upd) < 0) {
+        ioctl(g_fb.fd, FBIOPAN_DISPLAY, &g_fb.vinfo);
+    }
 }
 
 static inline uint32_t gray_to_pixel(FB *fb, uint8_t g) {
@@ -102,11 +178,20 @@ static inline uint32_t gray_to_pixel(FB *fb, uint8_t g) {
 }
 
 static void put_px(FB *fb, int x, int y, uint8_t g) {
-    if ((unsigned)x >= (unsigned)fb->w || (unsigned)y >= (unsigned)fb->h) return;
+    if ((unsigned)x >= (unsigned)fb->w || (unsigned)y >= (unsigned)fb->h || !fb->mem) return;
+    if (fb->bpp == 4) {
+        uint8_t *p = fb->mem + y * fb->stride + (x >> 1);
+        uint8_t v = (uint8_t)(g >> 4);
+        if ((x & 1) == 0) *p = (uint8_t)((*p & 0x0F) | (v << 4));
+        else *p = (uint8_t)((*p & 0xF0) | v);
+        return;
+    }
+    if (fb->bpp < 8) return;
     uint8_t *p = fb->mem + y * fb->stride + x * (fb->bpp / 8);
     uint32_t pix = gray_to_pixel(fb, g);
     if (fb->bpp == 8) p[0] = (uint8_t)pix;
     else if (fb->bpp == 16) *((uint16_t *)p) = (uint16_t)pix;
+    else if (fb->bpp == 24) { p[0] = p[1] = p[2] = g; }
     else if (fb->bpp == 32) *((uint32_t *)p) = pix;
 }
 
@@ -691,6 +776,7 @@ typedef struct { int x,y,w,h; const char *label; ButtonId id; } Button;
 typedef struct {
     int top_h, board_x, board_y, cell, board_size;
     int rack_y, rack_tile, rack_gap;
+    Button top_exit;
     Button buttons[BTN_COUNT];
 } Layout;
 
@@ -710,6 +796,12 @@ static void compute_layout(Layout *l) {
     l->rack_y = l->board_y + l->board_size + 8;
     l->rack_gap = maxi(3, w / 180);
     l->rack_tile = mini((w - 20 - (RACK_N - 1) * l->rack_gap) / RACK_N, clampi(h / 14, 44, 78));
+    l->top_exit.w = clampi(w / 7, 96, 150);
+    l->top_exit.h = clampi(l->top_h - 14, 44, 68);
+    l->top_exit.x = w - l->top_exit.w - 8;
+    l->top_exit.y = 7;
+    l->top_exit.label = "EXIT";
+    l->top_exit.id = BTN_EXIT;
     int btn_y = l->rack_y + l->rack_tile + 10;
     int gap = maxi(4, w / 120);
     int bw = (w - 16 - gap * (BTN_COUNT - 1)) / BTN_COUNT;
@@ -769,12 +861,14 @@ static void draw_status(Game *g) {
     rect_fill(0, L.top_h - 2, g_fb.w, 2, 0);
     char line1[128];
     snprintf(line1, sizeof(line1), "P%d TURN   P1 %d   P2 %d", g->current_player + 1, g->scores[0], g->scores[1]);
-    int sc = scale_for_box_text(line1, g_fb.w - 16, L.top_h / 2, 4);
+    int text_w = maxi(120, L.top_exit.x - 16);
+    int sc = scale_for_box_text(line1, text_w, L.top_h / 2, 4);
     draw_text(8, 8, line1, sc, 0);
     char line2[128];
     snprintf(line2, sizeof(line2), "TILES LEFT %d   DICT %d", g->bag_count, g->dict.count);
-    int sc2 = scale_for_box_text(line2, g_fb.w - 16, L.top_h / 2, 3);
+    int sc2 = scale_for_box_text(line2, text_w, L.top_h / 2, 3);
     draw_text(8, L.top_h / 2 + 4, line2, sc2, 0);
+    draw_button(&L.top_exit, "EXIT", false);
 }
 
 static void draw_board(Game *g) {
@@ -861,6 +955,7 @@ static void handoff_button_rect(int *x, int *y, int *w, int *h) {
 
 static void draw_handoff_screen(Game *g) {
     rect_fill(0, 0, g_fb.w, g_fb.h, 255);
+    draw_button(&L.top_exit, "EXIT", false);
     int box_w = g_fb.w * 84 / 100;
     int box_h = g_fb.h * 46 / 100;
     int box_x = (g_fb.w - box_w) / 2;
@@ -883,7 +978,7 @@ static void draw_all(Game *g) {
     compute_layout(&L);
     if (g->mode == MODE_HANDOFF) {
         draw_handoff_screen(g);
-        ioctl(g_fb.fd, FBIOPAN_DISPLAY, &g_fb.vinfo);
+        fb_refresh(true);
         return;
     }
     rect_fill(0, 0, g_fb.w, g_fb.h, 255);
@@ -898,7 +993,7 @@ static void draw_all(Game *g) {
         draw_button(&L.buttons[i], label, false);
     }
     draw_popup(g);
-    ioctl(g_fb.fd, FBIOPAN_DISPLAY, &g_fb.vinfo);
+    fb_refresh(true);
 }
 
 // ---------- Input handling ----------
@@ -996,6 +1091,19 @@ static int button_at(int x, int y) {
     return -1;
 }
 
+static bool top_exit_at(int x, int y) {
+    return x >= L.top_exit.x && x < L.top_exit.x + L.top_exit.w &&
+           y >= L.top_exit.y && y < L.top_exit.y + L.top_exit.h;
+}
+
+static void app_exit(Game *g) {
+    save_game(g);
+    rect_fill(0, 0, g_fb.w, g_fb.h, 255);
+    draw_text_center(0, g_fb.h / 2 - 28, g_fb.w, 56, "EXITING TILEWORDS", 4, 0);
+    fb_refresh(true);
+    g_running = 0;
+}
+
 static void handle_blank_popup(Game *g, int x, int y) {
     int w = g_fb.w * 82 / 100;
     int h = g_fb.h * 34 / 100;
@@ -1022,6 +1130,7 @@ static void handle_blank_popup(Game *g, int x, int y) {
 
 static void handle_click(Game *g, int x, int y) {
     compute_layout(&L);
+    if (top_exit_at(x, y)) { app_exit(g); return; }
     if (g->mode == MODE_HANDOFF) {
         int bx, by, bw, bh;
         handoff_button_rect(&bx, &by, &bw, &bh);
@@ -1045,7 +1154,7 @@ static void handle_click(Game *g, int x, int y) {
 
     int b = button_at(x, y);
     if (b >= 0) {
-        if (b == BTN_EXIT) { save_game(g); fb_close(&g_fb); exit(0); }
+        if (b == BTN_EXIT) { app_exit(g); return; }
         if (b == BTN_NEW) { g->mode = MODE_CONFIRM_NEW; return; }
         if (g->game_over) return;
         if (g->mode == MODE_EXCHANGE) {
@@ -1137,18 +1246,21 @@ static void event_loop(Game *g) {
     int fd = open_touch_device(&xmin,&xmax,&ymin,&ymax,&mt);
     if (fd < 0) {
         set_invalid(g, "NO TOUCH DEVICE FOUND");
-        while (1) { draw_all(g); sleep(1); }
+        while (g_running) { draw_all(g); sleep(1); }
+        return;
     }
+    g_touch_fd = fd;
+    if (ioctl(fd, EVIOCGRAB, 1) == 0) g_touch_grabbed = true;
     struct input_event ev;
     int rawx = xmin, rawy = ymin, sx = 0, sy = 0;
     bool down = false, had_down = false;
-    while (1) {
+    while (g_running) {
         ssize_t n = read(fd, &ev, sizeof(ev));
         if (n != sizeof(ev)) continue;
         if (ev.type == EV_ABS) {
             if (ev.code == ABS_MT_TRACKING_ID) {
                 if (ev.value < 0) {
-                    if (down || had_down) { handle_click(g, sx, sy); draw_all(g); }
+                    if (down || had_down) { handle_click(g, sx, sy); if (g_running) draw_all(g); }
                     down = false; had_down = false;
                 } else {
                     down = true; had_down = true;
@@ -1161,9 +1273,10 @@ static void event_loop(Game *g) {
             sy = map_coord(rawy, ymin, ymax, g_fb.h);
         } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
             if (ev.value) { down = true; had_down = true; }
-            else if (down || had_down) { down = false; had_down = false; handle_click(g, sx, sy); draw_all(g); }
+            else if (down || had_down) { down = false; had_down = false; handle_click(g, sx, sy); if (g_running) draw_all(g); }
         }
     }
+    release_touch();
 }
 
 static void init_home(Game *g, const char *argv0) {
@@ -1176,7 +1289,14 @@ static void init_home(Game *g, const char *argv0) {
     (void)argv0;
 }
 
+static void on_signal(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
 int main(int argc, char **argv) {
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
     memset(&G, 0, sizeof(G));
     init_home(&G, argc > 0 ? argv[0] : NULL);
