@@ -3,13 +3,7 @@
     {
       "name": "TileWords",
       "priority": 1,
-      "items": [
-        {
-          "name": "Start TileWords",
-          "priority": 1,
-          "action": "./tilewords.sh"
-        }
-      ]
+      "action": "./bin/start.sh"
     }
   ]
 }
