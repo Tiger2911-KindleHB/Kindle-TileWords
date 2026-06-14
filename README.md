@@ -61,7 +61,7 @@ The resulting folder should look like this:
 ```text
 /extensions/tilewords/
   tilewords.sh
-  menu.json
+  config.xml, menu.json
   bin/
     tilewords
   data/

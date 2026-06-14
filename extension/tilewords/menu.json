@@ -7,7 +7,7 @@
         {
           "name": "Start TileWords",
           "priority": 1,
-          "action": "tilewords.sh"
+          "action": "./tilewords.sh"
         }
       ]
     }
