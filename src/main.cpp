@@ -125,6 +125,9 @@ private:
     void touch_confirm_new(int x, int y);
 
     void queue_draw();
+    void queue_draw_rect(const Rect& r);
+    void queue_draw_rack();
+    Rect board_cell_rect(int row, int col) const;
     void quit();
     void new_game(bool reset_scores = true);
     void load_dictionary();
@@ -299,11 +302,7 @@ int TileWordsApp::run() {
         app_log("input: missing gdk window after show");
     }
     gtk_widget_grab_focus(window_);
-    g_timeout_add(250, TileWordsApp::on_raise_timer, this);
-    g_timeout_add(900, TileWordsApp::on_raise_timer, this);
-    g_timeout_add(1800, TileWordsApp::on_raise_timer, this);
-    gtk_widget_queue_draw(window_);
-    app_log("run: scheduled foreground raise timers");
+    app_log("run: popup shown without redraw timers");
     app_log("run: enter gtk_main");
     gtk_main();
     app_log("run: gtk_main returned");
@@ -357,7 +356,6 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
         gdk_window_raise(win);
         gdk_window_focus(win, GDK_CURRENT_TIME);
     }
-    gtk_widget_queue_draw(app->window_);
     return FALSE;
 }
 
@@ -553,12 +551,16 @@ void TileWordsApp::touch_normal(int x, int y) {
     if (in_rect(layout_.btn_submit, x, y)) { submit_move(); queue_draw(); return; }
     if (in_rect(layout_.btn_pass, x, y)) { pass_turn(); queue_draw(); return; }
     if (in_rect(layout_.btn_exchange, x, y)) { game_.mode = Mode::Exchange; game_.exchange_selected.fill(false); queue_draw(); return; }
-    if (in_rect(layout_.btn_shuffle, x, y)) { shuffle_rack(); save_game(); queue_draw(); return; }
+    if (in_rect(layout_.btn_shuffle, x, y)) { shuffle_rack(); save_game(); queue_draw_rack(); return; }
 
     for (int i = 0; i < RACK_N; ++i) {
         if (in_rect(layout_.rack[i], x, y)) {
-            if (game_.racks[game_.current][i].ch) game_.selected_rack = (game_.selected_rack == i) ? -1 : i;
-            queue_draw();
+            if (game_.racks[game_.current][i].ch) {
+                int old_selected = game_.selected_rack;
+                game_.selected_rack = (game_.selected_rack == i) ? -1 : i;
+                if (old_selected >= 0) queue_draw_rect(layout_.rack[old_selected]);
+                queue_draw_rect(layout_.rack[i]);
+            }
             return;
         }
     }
@@ -569,8 +571,11 @@ void TileWordsApp::touch_normal(int x, int y) {
         if (row < 0 || row >= BOARD_N || col < 0 || col >= BOARD_N) return;
         Cell& cell = game_.board[row][col];
         if (cell.ch && !cell.locked) {
+            int rack_idx = cell.rack_index;
             return_temp_tile(row, col);
-            queue_draw();
+            queue_draw_rect(board_cell_rect(row, col));
+            if (rack_idx >= 0 && rack_idx < RACK_N) queue_draw_rect(layout_.rack[rack_idx]);
+            else queue_draw_rack();
             return;
         }
         if (!cell.ch && game_.selected_rack >= 0) {
@@ -588,7 +593,12 @@ void TileWordsApp::touch_normal(int x, int y) {
                     game_.mode = Mode::BlankSelect;
                 }
                 game_.selected_rack = -1;
-                queue_draw();
+                if (game_.mode == Mode::BlankSelect) {
+                    queue_draw();
+                } else {
+                    queue_draw_rect(board_cell_rect(row, col));
+                    queue_draw_rect(layout_.rack[cell.rack_index]);
+                }
             }
         }
     }
@@ -608,7 +618,7 @@ void TileWordsApp::touch_exchange(int x, int y) {
     for (int i = 0; i < RACK_N; ++i) {
         if (in_rect(layout_.rack[i], x, y) && game_.racks[game_.current][i].ch) {
             game_.exchange_selected[i] = !game_.exchange_selected[i];
-            queue_draw();
+            queue_draw_rect(layout_.rack[i]);
             return;
         }
     }
@@ -646,6 +656,29 @@ void TileWordsApp::touch_confirm_new(int x, int y) {
 
 void TileWordsApp::queue_draw() {
     if (window_) gtk_widget_queue_draw(window_);
+}
+
+void TileWordsApp::queue_draw_rect(const Rect& r) {
+    if (!window_) return;
+    int x = std::max(0, r.x - 6);
+    int y = std::max(0, r.y - 6);
+    int w = r.w + 12;
+    int h = r.h + 12;
+    gtk_widget_queue_draw_area(window_, x, y, w, h);
+}
+
+void TileWordsApp::queue_draw_rack() {
+    if (!window_) return;
+    if (RACK_N <= 0) return;
+    int x1 = layout_.rack[0].x;
+    int y1 = layout_.rack[0].y;
+    int x2 = layout_.rack[RACK_N - 1].x + layout_.rack[RACK_N - 1].w;
+    int y2 = layout_.rack[0].y + layout_.rack[0].h;
+    queue_draw_rect({x1, y1, x2 - x1, y2 - y1});
+}
+
+Rect TileWordsApp::board_cell_rect(int row, int col) const {
+    return {layout_.board.x + col * layout_.cell, layout_.board.y + row * layout_.cell, layout_.cell, layout_.cell};
 }
 
 void TileWordsApp::quit() {
