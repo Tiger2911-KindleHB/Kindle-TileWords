@@ -60,7 +60,7 @@ struct Tile { char ch = 0; bool blank = false; };
 struct Cell { char ch = 0; bool locked = false; bool blank = false; int rack_index = -1; };
 
 enum class Premium { None, DL, TL, DW, TW, Star };
-enum class Mode { Normal, Handoff, Invalid, ConfirmNew, Exchange, BlankSelect, GameOver };
+enum class Mode { Normal, Handoff, Invalid, ConfirmNew, Exchange, BlankSelect, GameOver, Settings };
 
 struct MoveResult {
     bool ok = false;
@@ -78,6 +78,8 @@ struct Game {
     int selected_rack = -1;
     int pass_count = 0;
     bool game_over = false;
+    bool ai_enabled = false;
+    int tile_scale = 100;
     Mode mode = Mode::Normal;
     std::array<bool, RACK_N> exchange_selected{{false,false,false,false,false,false,false}};
     int blank_row = -1;
@@ -87,6 +89,7 @@ struct Game {
 
 struct Layout {
     Rect top_exit;
+    Rect top_settings;
     Rect top_new;
     Rect board;
     int cell = 0;
@@ -95,8 +98,12 @@ struct Layout {
     Rect btn_pass;
     Rect btn_exchange;
     Rect btn_shuffle;
-    Rect btn_new;
-    Rect btn_exit;
+    Rect btn_settings_ai;
+    Rect btn_settings_minus;
+    Rect btn_settings_plus;
+    Rect btn_settings_placeholder1;
+    Rect btn_settings_placeholder2;
+    Rect btn_settings_back;
     Rect confirm_button;
     Rect popup_yes;
     Rect popup_no;
@@ -132,6 +139,7 @@ private:
     void draw_exchange(cairo_t* cr, int w, int h);
     void draw_blank_select(cairo_t* cr, int w, int h);
     void draw_game_over(cairo_t* cr, int w, int h);
+    void draw_settings(cairo_t* cr, int w, int h);
 
     void touch(int x, int y);
     void touch_normal(int x, int y);
@@ -139,6 +147,7 @@ private:
     void touch_exchange(int x, int y);
     void touch_blank_select(int x, int y);
     void touch_confirm_new(int x, int y);
+    void touch_settings(int x, int y);
 
     void queue_draw();
     void queue_draw_rect(const Rect& r);
@@ -236,6 +245,39 @@ static void centered_text(cairo_t* cr, const Rect& r, const std::string& s, doub
     cairo_move_to(cr, x, y);
     cairo_show_text(cr, s.c_str());
 }
+
+static void draw_tile_face(cairo_t* cr, const Rect& r, char ch, int value, bool inverted, double scale_percent) {
+    fill_rect(cr, r, inverted ? 0.0 : 1.0);
+    stroke_rect(cr, r, 0.0, 3.0);
+    if (!ch) return;
+
+    double fg = inverted ? 1.0 : 0.0;
+    double base = std::min(r.w, r.h);
+    double letter_size = std::max(22.0, base * 0.56 * scale_percent / 100.0);
+    double value_size = std::max(16.0, base * 0.23 * scale_percent / 100.0);
+
+    std::string letter(1, ch);
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, letter_size);
+    cairo_text_extents_t le{};
+    cairo_text_extents(cr, letter.c_str(), &le);
+    set_gray(cr, fg);
+    double lx = r.x + (r.w - le.width) * 0.42 - le.x_bearing;
+    double ly = r.y + (r.h - le.height) * 0.43 - le.y_bearing;
+    cairo_move_to(cr, lx, ly);
+    cairo_show_text(cr, letter.c_str());
+
+    std::string val = std::to_string(value);
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, value_size);
+    cairo_text_extents_t ve{};
+    cairo_text_extents(cr, val.c_str(), &ve);
+    double vx = r.x + r.w - ve.width - std::max(5.0, base * 0.08) - ve.x_bearing;
+    double vy = r.y + r.h - std::max(5.0, base * 0.06) - ve.y_bearing;
+    cairo_move_to(cr, vx, vy);
+    cairo_show_text(cr, val.c_str());
+}
+
 
 static void draw_button(cairo_t* cr, const Rect& r, const std::string& label, bool inverted = false) {
     fill_rect(cr, r, inverted ? 0.0 : 1.0);
@@ -408,10 +450,15 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
 }
 
 void TileWordsApp::compute_layout(int w, int h) {
-    int top_h = std::max(72, h / 12);
-    int bottom_h = std::max(190, h / 5);
-    layout_.top_exit = {w - 132, 8, 122, top_h - 16};
-    layout_.top_new = {w - 264, 8, 122, top_h - 16};
+    int top_h = std::max(78, h / 12);
+    int bottom_h = std::max(210, h / 4);
+
+    int top_gap = 8;
+    int top_btn_h = top_h - 16;
+    int top_btn_w = std::max(112, std::min(150, w / 8));
+    layout_.top_exit = {w - top_gap - top_btn_w, 8, top_btn_w, top_btn_h};
+    layout_.top_settings = {layout_.top_exit.x - top_gap - top_btn_w, 8, top_btn_w, top_btn_h};
+    layout_.top_new = {layout_.top_settings.x - top_gap - top_btn_w, 8, top_btn_w, top_btn_h};
 
     int board_size = std::min(w - 24, h - top_h - bottom_h - 16);
     layout_.cell = board_size / BOARD_N;
@@ -419,25 +466,36 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.board = {(w - board_size) / 2, top_h + 8, board_size, board_size};
 
     int rack_y = layout_.board.y + layout_.board.h + 12;
-    int tile_w = std::min((w - 32) / RACK_N, std::max(62, h / 15));
+    int tile_w = std::min((w - 28) / RACK_N, std::max(70, h / 13));
     int rack_x = (w - tile_w * RACK_N) / 2;
     for (int i = 0; i < RACK_N; ++i) layout_.rack[i] = {rack_x + i * tile_w, rack_y, tile_w - 4, tile_w - 4};
 
-    int btn_y = rack_y + tile_w + 8;
-    int btn_h = std::max(52, h / 18);
-    int gap = 6;
-    int bw = (w - 7 * gap) / 6;
-    int x = gap;
+    int btn_y = rack_y + tile_w + 10;
+    int btn_h = std::max(62, h / 16);
+    int gap = std::max(8, w / 90);
+    int bw = std::min(210, (w - 5 * gap) / 4);
+    int total_w = 4 * bw + 3 * gap;
+    int x = (w - total_w) / 2;
     layout_.btn_submit = {x, btn_y, bw, btn_h}; x += bw + gap;
     layout_.btn_pass = {x, btn_y, bw, btn_h}; x += bw + gap;
     layout_.btn_exchange = {x, btn_y, bw, btn_h}; x += bw + gap;
-    layout_.btn_shuffle = {x, btn_y, bw, btn_h}; x += bw + gap;
-    layout_.btn_new = {x, btn_y, bw, btn_h}; x += bw + gap;
-    layout_.btn_exit = {x, btn_y, bw, btn_h};
+    layout_.btn_shuffle = {x, btn_y, bw, btn_h};
 
     layout_.confirm_button = {w / 4, h * 65 / 100, w / 2, std::max(76, h / 11)};
     layout_.popup_yes = {w / 2 - 190, h * 62 / 100, 170, 70};
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
+
+    int settings_w = std::min(w * 4 / 5, 720);
+    int settings_x = (w - settings_w) / 2;
+    int settings_y = h / 5;
+    int settings_btn_h = std::max(60, h / 17);
+    int settings_gap = 14;
+    layout_.btn_settings_ai = {settings_x + 40, settings_y + 95, settings_w - 80, settings_btn_h};
+    layout_.btn_settings_minus = {settings_x + 40, settings_y + 175, (settings_w - 100) / 2, settings_btn_h};
+    layout_.btn_settings_plus = {settings_x + 60 + (settings_w - 100) / 2, settings_y + 175, (settings_w - 100) / 2, settings_btn_h};
+    layout_.btn_settings_placeholder1 = {settings_x + 40, settings_y + 255, settings_w - 80, settings_btn_h};
+    layout_.btn_settings_placeholder2 = {settings_x + 40, settings_y + 255 + settings_btn_h + settings_gap, settings_w - 80, settings_btn_h};
+    layout_.btn_settings_back = {settings_x + settings_w / 2 - 120, settings_y + 255 + (settings_btn_h + settings_gap) * 2, 240, settings_btn_h};
 }
 
 void TileWordsApp::draw(cairo_t* cr, int w, int h) {
@@ -449,6 +507,7 @@ void TileWordsApp::draw(cairo_t* cr, int w, int h) {
         case Mode::Exchange: draw_exchange(cr, w, h); break;
         case Mode::BlankSelect: draw_blank_select(cr, w, h); break;
         case Mode::GameOver: draw_game_over(cr, w, h); break;
+        case Mode::Settings: draw_settings(cr, w, h); break;
         case Mode::Normal: default: draw_normal(cr, w, h); break;
     }
 }
@@ -460,6 +519,7 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
        << "   P2 " << game_.scores[1] << "   Tiles " << game_.bag.size();
     text(cr, 20, 72, ss.str(), 24, 0.0, false);
     draw_button(cr, layout_.top_new, "NEW");
+    draw_button(cr, layout_.top_settings, "SETTINGS");
     draw_button(cr, layout_.top_exit, "EXIT");
 
     for (int r = 0; r < BOARD_N; ++r) {
@@ -474,10 +534,8 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
             stroke_rect(cr, cell, 0.0, 1.0);
 
             if (game_.board[r][c].ch) {
-                std::string s(1, game_.board[r][c].ch);
-                centered_text(cr, cell, s, layout_.cell * 0.52, 0.0, true);
                 int val = game_.board[r][c].blank ? 0 : letter_value(game_.board[r][c].ch);
-                text(cr, cell.x + cell.w - 15, cell.y + cell.h - 7, std::to_string(val), std::max(8, layout_.cell / 5), 0.0, false);
+                draw_tile_face(cr, cell, game_.board[r][c].ch, val, false, game_.tile_scale);
             } else {
                 std::string lab;
                 if (p == Premium::DL) lab = "2L";
@@ -492,19 +550,15 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
 
     for (int i = 0; i < RACK_N; ++i) {
         bool selected = game_.selected_rack == i;
-        draw_button(cr, layout_.rack[i], game_.racks[game_.current][i].ch ? std::string(1, game_.racks[game_.current][i].ch) : "", selected);
-        if (game_.racks[game_.current][i].ch) {
-            int val = game_.racks[game_.current][i].blank ? 0 : letter_value(game_.racks[game_.current][i].ch);
-            text(cr, layout_.rack[i].x + layout_.rack[i].w - 20, layout_.rack[i].y + layout_.rack[i].h - 10, std::to_string(val), 14, selected ? 1.0 : 0.0, false);
-        }
+        Tile t = game_.racks[game_.current][i];
+        if (t.ch) draw_tile_face(cr, layout_.rack[i], t.ch == '?' ? '?' : t.ch, t.blank ? 0 : letter_value(t.ch), selected, game_.tile_scale);
+        else draw_button(cr, layout_.rack[i], "", selected);
     }
 
     draw_button(cr, layout_.btn_submit, "SUBMIT");
     draw_button(cr, layout_.btn_pass, "PASS");
-    draw_button(cr, layout_.btn_exchange, "EXCH");
+    draw_button(cr, layout_.btn_exchange, "EXCHANGE");
     draw_button(cr, layout_.btn_shuffle, "SHUFFLE");
-    draw_button(cr, layout_.btn_new, "NEW");
-    draw_button(cr, layout_.btn_exit, "EXIT");
 }
 
 void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
@@ -578,8 +632,32 @@ void TileWordsApp::draw_game_over(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.popup_no, "EXIT");
 }
 
+void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
+    draw_normal(cr, w, h);
+    Rect box{w / 10, h / 6, w * 8 / 10, h * 2 / 3};
+    fill_rect(cr, box, 1.0);
+    stroke_rect(cr, box, 0.0, 4.0);
+    centered_text(cr, {box.x, box.y + 18, box.w, 54}, "SETTINGS", 34, 0.0, true);
+
+    draw_button(cr, layout_.btn_settings_ai, game_.ai_enabled ? "AI OPPONENT: ON" : "AI OPPONENT: OFF");
+    draw_button(cr, layout_.btn_settings_minus, "TILE FONT -");
+    draw_button(cr, layout_.btn_settings_plus, "TILE FONT +");
+    std::ostringstream ss;
+    ss << "Tile font: " << game_.tile_scale << "%";
+    centered_text(cr, {box.x, layout_.btn_settings_minus.y - 34, box.w, 30}, ss.str(), 22, 0.0, false);
+    fill_rect(cr, layout_.btn_settings_placeholder1, 0.92);
+    stroke_rect(cr, layout_.btn_settings_placeholder1, 0.0, 3.0);
+    centered_text(cr, layout_.btn_settings_placeholder1, "FUTURE OPTION 1", std::max(18.0, layout_.btn_settings_placeholder1.h * 0.36), 0.45, true);
+    fill_rect(cr, layout_.btn_settings_placeholder2, 0.92);
+    stroke_rect(cr, layout_.btn_settings_placeholder2, 0.0, 3.0);
+    centered_text(cr, layout_.btn_settings_placeholder2, "FUTURE OPTION 2", std::max(18.0, layout_.btn_settings_placeholder2.h * 0.36), 0.45, true);
+    draw_button(cr, layout_.btn_settings_back, "BACK");
+}
+
 void TileWordsApp::touch(int x, int y) {
-    if (in_rect(layout_.top_exit, x, y) || in_rect(layout_.btn_exit, x, y)) { quit(); return; }
+    if (in_rect(layout_.top_exit, x, y)) { quit(); return; }
+    if (game_.mode == Mode::Normal && in_rect(layout_.top_settings, x, y)) { game_.mode = Mode::Settings; queue_draw(); return; }
+    if (game_.mode == Mode::Normal && in_rect(layout_.top_new, x, y)) { game_.mode = Mode::ConfirmNew; queue_draw(); return; }
     switch (game_.mode) {
         case Mode::Handoff: touch_handoff(x, y); break;
         case Mode::Invalid: game_.mode = Mode::Normal; queue_draw(); break;
@@ -590,12 +668,12 @@ void TileWordsApp::touch(int x, int y) {
             if (in_rect(layout_.popup_yes, x, y)) { new_game(true); queue_draw(); }
             else if (in_rect(layout_.popup_no, x, y)) quit();
             break;
+        case Mode::Settings: touch_settings(x, y); break;
         case Mode::Normal: default: touch_normal(x, y); break;
     }
 }
 
 void TileWordsApp::touch_normal(int x, int y) {
-    if (in_rect(layout_.top_new, x, y) || in_rect(layout_.btn_new, x, y)) { game_.mode = Mode::ConfirmNew; queue_draw(); return; }
     if (in_rect(layout_.btn_submit, x, y)) { submit_move(); queue_draw(); return; }
     if (in_rect(layout_.btn_pass, x, y)) { pass_turn(); queue_draw(); return; }
     if (in_rect(layout_.btn_exchange, x, y)) { game_.mode = Mode::Exchange; game_.exchange_selected.fill(false); queue_draw(); return; }
@@ -702,6 +780,23 @@ void TileWordsApp::touch_confirm_new(int x, int y) {
     else if (in_rect(layout_.popup_no, x, y)) { game_.mode = Mode::Normal; queue_draw(); }
 }
 
+void TileWordsApp::touch_settings(int x, int y) {
+    if (in_rect(layout_.btn_settings_back, x, y)) { game_.mode = Mode::Normal; save_game(); queue_draw(); return; }
+    if (in_rect(layout_.btn_settings_ai, x, y)) { game_.ai_enabled = !game_.ai_enabled; save_game(); queue_draw(); return; }
+    if (in_rect(layout_.btn_settings_minus, x, y)) {
+        game_.tile_scale = std::max(80, game_.tile_scale - 10);
+        save_game();
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.btn_settings_plus, x, y)) {
+        game_.tile_scale = std::min(140, game_.tile_scale + 10);
+        save_game();
+        queue_draw();
+        return;
+    }
+}
+
 void TileWordsApp::queue_draw() {
     if (!window_) return;
     full_redraw_pending_ = true;
@@ -764,7 +859,11 @@ Tile TileWordsApp::draw_tile() {
 }
 
 void TileWordsApp::new_game(bool reset_scores) {
+    bool keep_ai = game_.ai_enabled;
+    int keep_tile_scale = game_.tile_scale;
     game_ = Game{};
+    game_.ai_enabled = keep_ai;
+    game_.tile_scale = std::max(80, std::min(140, keep_tile_scale));
     if (!reset_scores) game_.scores = {{0,0}};
     const char* letters =
         "AAAAAAAAA" "BB" "CC" "DDDD" "EEEEEEEEEEEE" "FF" "GGG" "HH" "IIIIIIIII"
@@ -826,6 +925,8 @@ void TileWordsApp::save_game() {
     out << "  \"score1\": " << game_.scores[1] << ",\n";
     out << "  \"handoff\": " << (game_.mode == Mode::Handoff ? 1 : 0) << ",\n";
     out << "  \"game_over\": " << (game_.game_over ? 1 : 0) << ",\n";
+    out << "  \"ai_enabled\": " << (game_.ai_enabled ? 1 : 0) << ",\n";
+    out << "  \"tile_scale\": " << game_.tile_scale << ",\n";
     out << "  \"bag\": \"";
     for (const auto& t : game_.bag) out << t.ch;
     out << "\",\n";
@@ -865,6 +966,8 @@ bool TileWordsApp::load_game() {
     loaded.scores[0] = json_int_value(src, "score0", 0);
     loaded.scores[1] = json_int_value(src, "score1", 0);
     loaded.game_over = json_int_value(src, "game_over", 0) != 0;
+    loaded.ai_enabled = json_int_value(src, "ai_enabled", 0) != 0;
+    loaded.tile_scale = std::max(80, std::min(140, json_int_value(src, "tile_scale", 100)));
     loaded.mode = loaded.game_over ? Mode::GameOver : (json_int_value(src, "handoff", 0) ? Mode::Handoff : Mode::Normal);
 
     std::string bag = json_string_value(src, "bag");
