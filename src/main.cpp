@@ -37,6 +37,7 @@ static void app_log_signal(int sig) {
 
 constexpr int BOARD_N = 15;
 constexpr int RACK_N = 7;
+constexpr int MAX_PLAYERS = 4;
 constexpr int BINGO_BONUS = 50;
 
 struct Rect { int x = 0, y = 0, w = 0, h = 0; };
@@ -62,7 +63,7 @@ struct Tile { char ch = 0; bool blank = false; };
 struct Cell { char ch = 0; bool locked = false; bool blank = false; int rack_index = -1; };
 
 enum class Premium { None, DL, TL, DW, TW, Star };
-enum class Mode { Normal, Handoff, Invalid, ConfirmNew, Exchange, BlankSelect, GameOver, Settings };
+enum class Mode { Normal, Handoff, Invalid, NewSetup, Exchange, BlankSelect, GameOver, Settings };
 
 struct MoveResult {
     bool ok = false;
@@ -72,16 +73,25 @@ struct MoveResult {
 
 struct Game {
     std::array<std::array<Cell, BOARD_N>, BOARD_N> board{};
-    std::array<std::array<Tile, RACK_N>, 2> racks{};
-    std::array<int, 2> rack_count{{0,0}};
+    std::array<std::array<Premium, BOARD_N>, BOARD_N> premiums{};
+    std::array<std::array<Tile, RACK_N>, MAX_PLAYERS> racks{};
+    std::array<int, MAX_PLAYERS> rack_count{{0,0,0,0}};
     std::vector<Tile> bag;
-    std::array<int, 2> scores{{0,0}};
+    std::array<int, MAX_PLAYERS> scores{{0,0,0,0}};
+    std::array<bool, MAX_PLAYERS> cpu{{false,false,false,false}};
+    int player_count = 2;
+    int setup_player_count = 2;
+    std::array<bool, MAX_PLAYERS> setup_cpu{{false,false,false,false}};
     int current = 0;
     int selected_rack = -1;
     int pass_count = 0;
     bool game_over = false;
     bool ai_enabled = false;
     int tile_scale = 100;
+    int tile_limit_option = 100;
+    bool procedural_board = false;
+    bool setup_procedural_board = false;
+    int starter_letters_option = 0;
     Mode mode = Mode::Normal;
     std::array<bool, RACK_N> exchange_selected{{false,false,false,false,false,false,false}};
     int blank_row = -1;
@@ -100,6 +110,7 @@ struct Layout {
     Rect btn_pass;
     Rect btn_exchange;
     Rect btn_shuffle;
+    Rect btn_value;
     Rect btn_settings_ai;
     Rect btn_settings_minus;
     Rect btn_settings_plus;
@@ -109,6 +120,13 @@ struct Layout {
     Rect confirm_button;
     Rect popup_yes;
     Rect popup_no;
+    Rect setup_players;
+    std::array<Rect, MAX_PLAYERS> setup_player_type{};
+    Rect setup_tile_limit;
+    Rect setup_board_size;
+    Rect setup_custom_board;
+    Rect setup_start;
+    Rect setup_cancel;
 };
 
 class TileWordsApp {
@@ -137,7 +155,7 @@ private:
     void draw_normal(cairo_t* cr, int w, int h);
     void draw_handoff(cairo_t* cr, int w, int h);
     void draw_invalid(cairo_t* cr, int w, int h);
-    void draw_confirm_new(cairo_t* cr, int w, int h);
+    void draw_new_setup(cairo_t* cr, int w, int h);
     void draw_exchange(cairo_t* cr, int w, int h);
     void draw_blank_select(cairo_t* cr, int w, int h);
     void draw_game_over(cairo_t* cr, int w, int h);
@@ -148,13 +166,17 @@ private:
     void touch_handoff(int x, int y);
     void touch_exchange(int x, int y);
     void touch_blank_select(int x, int y);
-    void touch_confirm_new(int x, int y);
+    void touch_new_setup(int x, int y);
     void touch_settings(int x, int y);
 
     void queue_draw();
     void queue_draw_rect(const Rect& r);
     void queue_draw_rack();
     Rect board_cell_rect(int row, int col) const;
+    Premium cell_premium(int row, int col) const;
+    void setup_premiums();
+    void place_starter_letters();
+    bool can_place_starter_at(int row, int col) const;
     void quit();
     void new_game(bool reset_scores = true);
     void load_dictionary();
@@ -165,7 +187,10 @@ private:
     void shuffle_rack();
     void pass_turn();
     void exchange_tiles();
+    int next_player_index() const;
+    void advance_to_next_player();
     void enter_handoff();
+    int preview_score() const;
     void reject(const std::string& msg);
     void submit_move();
     MoveResult validate_and_score();
@@ -221,7 +246,7 @@ static int letter_value(char c) {
     }
 }
 
-static Premium premium_at(int r, int c) {
+static Premium standard_premium_at(int r, int c) {
     static const int tw[][2] = {{0,0},{0,7},{0,14},{7,0},{7,14},{14,0},{14,7},{14,14}};
     static const int dw[][2] = {{1,1},{2,2},{3,3},{4,4},{10,10},{11,11},{12,12},{13,13},{1,13},{2,12},{3,11},{4,10},{10,4},{11,3},{12,2},{13,1}};
     static const int tl[][2] = {{1,5},{1,9},{5,1},{5,5},{5,9},{5,13},{9,1},{9,5},{9,9},{9,13},{13,5},{13,9}};
@@ -232,6 +257,29 @@ static Premium premium_at(int r, int c) {
     for (auto& p : tl) if (p[0] == r && p[1] == c) return Premium::TL;
     for (auto& p : dl) if (p[0] == r && p[1] == c) return Premium::DL;
     return Premium::None;
+}
+
+
+static char premium_to_char(Premium p) {
+    switch (p) {
+        case Premium::DL: return 'L';
+        case Premium::TL: return 'T';
+        case Premium::DW: return 'W';
+        case Premium::TW: return 'Q';
+        case Premium::Star: return 'S';
+        case Premium::None: default: return '.';
+    }
+}
+
+static Premium premium_from_char(char ch) {
+    switch (ch) {
+        case 'L': return Premium::DL;
+        case 'T': return Premium::TL;
+        case 'W': return Premium::DW;
+        case 'Q': return Premium::TW;
+        case 'S': return Premium::Star;
+        default: return Premium::None;
+    }
 }
 
 static void set_gray(cairo_t* cr, double g) { cairo_set_source_rgb(cr, g, g, g); }
@@ -477,50 +525,55 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
 }
 
 void TileWordsApp::compute_layout(int w, int h) {
-    int top_h = std::max(70, h / 14);
-    int bottom_h = std::max(205, h / 4);
+    int top_h = std::max(122, h / 8);
+    int bottom_h = std::max(245, h / 4);
 
     int top_gap = 8;
-    int top_btn_h = std::max(58, top_h - 14);
-    int top_btn_w = std::max(104, std::min(132, w / 7));
-    layout_.top_exit = {w - top_gap - top_btn_w, 7, top_btn_w, top_btn_h};
-    layout_.top_settings = {layout_.top_exit.x - top_gap - top_btn_w, 7, top_btn_w, top_btn_h};
-    layout_.top_new = {layout_.top_settings.x - top_gap - top_btn_w, 7, top_btn_w, top_btn_h};
+    int top_btn_h = std::max(48, h / 20);
+    int new_w = std::max(94, std::min(126, w / 8));
+    int settings_w = std::max(150, std::min(178, w / 5));
+    int exit_w = std::max(94, std::min(126, w / 8));
+    layout_.top_exit = {w - top_gap - exit_w, 8, exit_w, top_btn_h};
+    layout_.top_settings = {layout_.top_exit.x - top_gap - settings_w, 8, settings_w, top_btn_h};
+    layout_.top_new = {layout_.top_settings.x - top_gap - new_w, 8, new_w, top_btn_h};
 
-    int board_size = std::min(w - 24, h - top_h - bottom_h - 16);
-    layout_.cell = board_size / BOARD_N;
+    int board_size = std::min(w - 70, h - top_h - bottom_h - 20);
+    layout_.cell = std::max(28, board_size / BOARD_N);
     board_size = layout_.cell * BOARD_N;
-    layout_.board = {(w - board_size) / 2, top_h + 8, board_size, board_size};
+    layout_.board = {(w - board_size) / 2, top_h + 4, board_size, board_size};
 
-    int rack_y = layout_.board.y + layout_.board.h + 12;
-    int tile_w = std::min((w - 28) / RACK_N, std::max(76, h / 12));
-    int rack_x = (w - tile_w * RACK_N) / 2;
-    for (int i = 0; i < RACK_N; ++i) layout_.rack[i] = {rack_x + i * tile_w, rack_y, tile_w - 4, tile_w - 4};
+    int rack_tile = std::min((w - 70) / RACK_N, std::max(80, h / 11));
+    int rack_y = std::min(h - rack_tile - std::max(76, h / 16) - 16, layout_.board.y + layout_.board.h + 12);
+    rack_y = std::max(layout_.board.y + layout_.board.h + 6, rack_y);
+    int rack_x = (w - rack_tile * RACK_N) / 2;
+    for (int i = 0; i < RACK_N; ++i) layout_.rack[i] = {rack_x + i * rack_tile, rack_y, rack_tile - 5, rack_tile - 5};
 
-    int btn_y = rack_y + tile_w + 10;
-    int btn_h = std::max(58, h / 17);
-    int gap = std::max(8, w / 90);
-    int bw = std::min(196, (w - 5 * gap) / 4);
-    int total_w = 4 * bw + 3 * gap;
-    int x = (w - total_w) / 2;
+    int btn_y = rack_y + rack_tile + 8;
+    int btn_h = std::max(58, h / 18);
+    int gap = std::max(8, w / 100);
+    int bw = std::min(150, (w - 80 - 4 * gap) / 5);
+    int value_w = std::min(170, std::max(130, bw + 18));
+    int total_w = 4 * bw + value_w + 4 * gap;
+    int x = std::max(12, (w - total_w) / 2);
     layout_.btn_submit = {x, btn_y, bw, btn_h}; x += bw + gap;
     layout_.btn_pass = {x, btn_y, bw, btn_h}; x += bw + gap;
     layout_.btn_exchange = {x, btn_y, bw, btn_h}; x += bw + gap;
-    layout_.btn_shuffle = {x, btn_y, bw, btn_h};
+    layout_.btn_shuffle = {x, btn_y, bw, btn_h}; x += bw + gap;
+    layout_.btn_value = {x, btn_y, value_w, btn_h};
 
     layout_.confirm_button = {w / 4, h * 65 / 100, w / 2, std::max(76, h / 11)};
     layout_.popup_yes = {w / 2 - 190, h * 62 / 100, 170, 70};
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
 
-    int settings_w = std::min(w * 4 / 5, 680);
-    int settings_h = std::min(h * 58 / 100, 500);
-    int settings_x = (w - settings_w) / 2;
+    int settings_w2 = std::min(w * 4 / 5, 680);
+    int settings_h = std::min(h * 46 / 100, 390);
+    int settings_x = (w - settings_w2) / 2;
     int settings_y = (h - settings_h) / 2;
-    int inner_x = settings_x + 48;
-    int inner_w = settings_w - 96;
-    int settings_btn_h = std::max(58, h / 18);
+    int inner_x = settings_x + 50;
+    int inner_w = settings_w2 - 100;
+    int settings_btn_h = std::max(54, h / 20);
     int settings_gap = 18;
-    int first_y = settings_y + 98;
+    int first_y = settings_y + 90;
 
     layout_.btn_settings_ai = {inner_x, first_y, inner_w, settings_btn_h};
     int half_w = (inner_w - settings_gap) / 2;
@@ -529,7 +582,27 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.btn_settings_placeholder2 = {inner_x + half_w + settings_gap, future_y, half_w, settings_btn_h};
     layout_.btn_settings_minus = {0, 0, 0, 0};
     layout_.btn_settings_plus = {0, 0, 0, 0};
-    layout_.btn_settings_back = {settings_x + settings_w / 2 - 100, future_y + settings_btn_h + settings_gap + 12, 200, settings_btn_h};
+    layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 100, future_y + settings_btn_h + settings_gap + 8, 200, settings_btn_h};
+
+    int setup_w = std::min(w * 86 / 100, 760);
+    int setup_h = std::min(h * 70 / 100, 660);
+    int setup_x = (w - setup_w) / 2;
+    int setup_y = (h - setup_h) / 2;
+    int row_h = std::max(54, h / 19);
+    int row_gap = 14;
+    layout_.setup_players = {setup_x + 42, setup_y + 92, setup_w - 84, row_h};
+    int py = setup_y + 162;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        layout_.setup_player_type[i] = {setup_x + 42, py + i * (row_h + 8), setup_w - 84, row_h};
+    }
+    int opt_y = py + MAX_PLAYERS * (row_h + 8) + row_gap;
+    int opt_w = (setup_w - 84 - row_gap) / 2;
+    layout_.setup_tile_limit = {setup_x + 42, opt_y, opt_w, row_h};
+    layout_.setup_board_size = {setup_x + 42 + opt_w + row_gap, opt_y, opt_w, row_h};
+    layout_.setup_custom_board = {setup_x + 42, opt_y + row_h + row_gap, setup_w - 84, row_h};
+    int action_y = setup_y + setup_h - row_h - 34;
+    layout_.setup_start = {setup_x + setup_w / 2 - 220, action_y, 190, row_h};
+    layout_.setup_cancel = {setup_x + setup_w / 2 + 30, action_y, 190, row_h};
 }
 
 void TileWordsApp::draw(cairo_t* cr, int w, int h) {
@@ -537,7 +610,7 @@ void TileWordsApp::draw(cairo_t* cr, int w, int h) {
     switch (game_.mode) {
         case Mode::Handoff: draw_handoff(cr, w, h); break;
         case Mode::Invalid: draw_invalid(cr, w, h); break;
-        case Mode::ConfirmNew: draw_confirm_new(cr, w, h); break;
+        case Mode::NewSetup: draw_new_setup(cr, w, h); break;
         case Mode::Exchange: draw_exchange(cr, w, h); break;
         case Mode::BlankSelect: draw_blank_select(cr, w, h); break;
         case Mode::GameOver: draw_game_over(cr, w, h); break;
@@ -547,19 +620,37 @@ void TileWordsApp::draw(cairo_t* cr, int w, int h) {
 }
 
 void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
-    text(cr, 20, 44, "TileWords", 30, 0.0, true);
-    std::ostringstream ss;
-    ss << "P" << (game_.current + 1) << " turn   P1 " << game_.scores[0]
-       << "   P2 " << game_.scores[1] << "   Tiles " << game_.bag.size();
-    text(cr, 20, 72, ss.str(), 24, 0.0, false);
     draw_button(cr, layout_.top_new, "NEW");
     draw_button(cr, layout_.top_settings, "SETTINGS");
     draw_button(cr, layout_.top_exit, "EXIT");
 
+    int score_x = 14;
+    int score_y = 12;
+    int score_area_w = std::max(280, layout_.top_new.x - 24);
+    int cols = game_.player_count <= 2 ? 2 : 2;
+    int row_h = 42;
+    int col_w = score_area_w / cols;
+    for (int i = 0; i < game_.player_count; ++i) {
+        int col = i % cols;
+        int row = i / cols;
+        Rect pr{score_x + col * col_w, score_y + row * row_h, col_w - 10, row_h - 8};
+        if (i == game_.current) {
+            fill_rect(cr, pr, 0.88);
+            stroke_rect(cr, pr, 0.0, 3.0);
+        }
+        std::ostringstream ps;
+        ps << "Player " << (i + 1) << ": " << game_.scores[i];
+        if (game_.cpu[i]) ps << " CPU";
+        centered_text(cr, pr, ps.str(), 24, 0.0, true);
+    }
+    std::ostringstream ts;
+    ts << "Tiles remaining: " << game_.bag.size();
+    text(cr, score_x + 2, score_y + (game_.player_count > 2 ? 92 : 50), ts.str(), 22, 0.0, true);
+
     for (int r = 0; r < BOARD_N; ++r) {
         for (int c = 0; c < BOARD_N; ++c) {
             Rect cell{layout_.board.x + c * layout_.cell, layout_.board.y + r * layout_.cell, layout_.cell, layout_.cell};
-            Premium p = premium_at(r, c);
+            Premium p = cell_premium(r, c);
             double bg = 1.0;
             if (p == Premium::DL || p == Premium::DW || p == Premium::Star) bg = 0.88;
             if (p == Premium::TL || p == Premium::TW) bg = 0.78;
@@ -593,6 +684,9 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.btn_pass, "PASS");
     draw_button(cr, layout_.btn_exchange, "EXCHANGE");
     draw_button(cr, layout_.btn_shuffle, "SHUFFLE");
+    std::ostringstream vs;
+    vs << "VALUE " << preview_score();
+    draw_button(cr, layout_.btn_value, vs.str());
 }
 
 void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
@@ -601,11 +695,19 @@ void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
     Rect box{w / 12, h / 4, w * 5 / 6, h / 3};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    centered_text(cr, {box.x, box.y + 30, box.w, 70}, "PASS KINDLE", 44, 0.0, true);
-    std::ostringstream ss; ss << "PLAYER " << (game_.current + 1) << "'S TURN";
-    centered_text(cr, {box.x, box.y + 130, box.w, 60}, ss.str(), 34, 0.0, true);
-    centered_text(cr, {box.x, box.y + 190, box.w, 45}, "RACK HIDDEN UNTIL CONFIRM", 22, 0.0, false);
-    draw_button(cr, layout_.confirm_button, "CONFIRM");
+    if (game_.cpu[game_.current]) {
+        centered_text(cr, {box.x, box.y + 30, box.w, 70}, "CPU PLAYER", 44, 0.0, true);
+        std::ostringstream ss; ss << "PLAYER " << (game_.current + 1) << " IS CPU";
+        centered_text(cr, {box.x, box.y + 125, box.w, 60}, ss.str(), 34, 0.0, true);
+        centered_text(cr, {box.x, box.y + 188, box.w, 45}, "AI MOVE ENGINE NOT ENABLED YET", 22, 0.0, false);
+        draw_button(cr, layout_.confirm_button, "CONTINUE");
+    } else {
+        centered_text(cr, {box.x, box.y + 30, box.w, 70}, "PASS KINDLE", 44, 0.0, true);
+        std::ostringstream ss; ss << "PLAYER " << (game_.current + 1) << "'S TURN";
+        centered_text(cr, {box.x, box.y + 130, box.w, 60}, ss.str(), 34, 0.0, true);
+        centered_text(cr, {box.x, box.y + 190, box.w, 45}, "RACK HIDDEN UNTIL CONFIRM", 22, 0.0, false);
+        draw_button(cr, layout_.confirm_button, "CONFIRM");
+    }
 }
 
 void TileWordsApp::draw_invalid(cairo_t* cr, int w, int h) {
@@ -618,14 +720,48 @@ void TileWordsApp::draw_invalid(cairo_t* cr, int w, int h) {
     draw_button(cr, {w / 2 - 100, box.y + box.h - 85, 200, 62}, "OK");
 }
 
-void TileWordsApp::draw_confirm_new(cairo_t* cr, int w, int h) {
+void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
-    Rect box{w / 10, h / 3, w * 8 / 10, h / 4};
+    int box_w = std::min(w * 86 / 100, 760);
+    int box_h = std::min(h * 70 / 100, 660);
+    Rect box{(w - box_w) / 2, (h - box_h) / 2, box_w, box_h};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    centered_text(cr, {box.x, box.y + 30, box.w, 70}, "START NEW GAME?", 34, 0.0, true);
-    draw_button(cr, layout_.popup_yes, "YES");
-    draw_button(cr, layout_.popup_no, "NO");
+    centered_text(cr, {box.x, box.y + 18, box.w, 60}, "NEW GAME SETUP", 34, 0.0, true);
+
+    std::ostringstream pc;
+    pc << "PLAYERS: " << game_.setup_player_count << "    Tap to change";
+    draw_button(cr, layout_.setup_players, pc.str());
+
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        bool active = i < game_.setup_player_count;
+        Rect r = layout_.setup_player_type[i];
+        if (!active) {
+            fill_rect(cr, r, 0.94);
+            stroke_rect(cr, r, 0.0, 2.0);
+            std::ostringstream off; off << "PLAYER " << (i + 1) << ": OFF";
+            centered_text(cr, r, off.str(), 22, 0.55, true);
+        } else {
+            std::ostringstream ss;
+            ss << "PLAYER " << (i + 1) << ": " << (game_.setup_cpu[i] ? "CPU" : "HUMAN");
+            draw_button(cr, r, ss.str());
+        }
+    }
+
+    std::ostringstream tl;
+    tl << "TILE LIMIT: " << game_.tile_limit_option;
+    draw_button(cr, layout_.setup_tile_limit, tl.str());
+
+    std::ostringstream bs;
+    bs << "BOARD: " << (game_.setup_procedural_board ? "PROCEDURAL" : "STANDARD");
+    draw_button(cr, layout_.setup_board_size, bs.str());
+
+    std::ostringstream st;
+    st << "STARTER LETTERS: " << game_.starter_letters_option;
+    draw_button(cr, layout_.setup_custom_board, st.str());
+
+    draw_button(cr, layout_.setup_start, "START GAME");
+    draw_button(cr, layout_.setup_cancel, "CANCEL");
 }
 
 void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
@@ -659,8 +795,13 @@ void TileWordsApp::draw_game_over(cairo_t* cr, int w, int h) {
     Rect box{w / 10, h / 3, w * 8 / 10, h / 4};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    int winner = game_.scores[0] == game_.scores[1] ? 0 : (game_.scores[0] > game_.scores[1] ? 1 : 2);
-    std::string msg = winner == 0 ? "GAME OVER - TIE" : "GAME OVER - PLAYER " + std::to_string(winner) + " WINS";
+    int winner = 0;
+    bool tie = true;
+    for (int i = 1; i < game_.player_count; ++i) {
+        if (game_.scores[i] != game_.scores[winner]) tie = false;
+        if (game_.scores[i] > game_.scores[winner]) winner = i;
+    }
+    std::string msg = tie ? "GAME OVER - TIE" : "GAME OVER - PLAYER " + std::to_string(winner + 1) + " WINS";
     centered_text(cr, {box.x, box.y + 30, box.w, 70}, msg, 32, 0.0, true);
     draw_button(cr, layout_.popup_yes, "NEW");
     draw_button(cr, layout_.popup_no, "EXIT");
@@ -692,11 +833,11 @@ void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
 void TileWordsApp::touch(int x, int y) {
     if (in_rect(layout_.top_exit, x, y)) { quit(); return; }
     if (game_.mode == Mode::Normal && in_rect(layout_.top_settings, x, y)) { game_.mode = Mode::Settings; queue_draw(); return; }
-    if (game_.mode == Mode::Normal && in_rect(layout_.top_new, x, y)) { game_.mode = Mode::ConfirmNew; queue_draw(); return; }
+    if (game_.mode == Mode::Normal && in_rect(layout_.top_new, x, y)) { game_.setup_player_count = game_.player_count; game_.setup_cpu = game_.cpu; game_.setup_procedural_board = game_.procedural_board; game_.mode = Mode::NewSetup; queue_draw(); return; }
     switch (game_.mode) {
         case Mode::Handoff: touch_handoff(x, y); break;
         case Mode::Invalid: game_.mode = Mode::Normal; queue_draw(); break;
-        case Mode::ConfirmNew: touch_confirm_new(x, y); break;
+        case Mode::NewSetup: touch_new_setup(x, y); break;
         case Mode::Exchange: touch_exchange(x, y); break;
         case Mode::BlankSelect: touch_blank_select(x, y); break;
         case Mode::GameOver:
@@ -759,6 +900,7 @@ void TileWordsApp::touch_normal(int x, int y) {
                 } else {
                     queue_draw_rect(board_cell_rect(row, col));
                     queue_draw_rect(layout_.rack[cell.rack_index]);
+                    queue_draw_rect(layout_.btn_value);
                 }
             }
         }
@@ -810,9 +952,53 @@ void TileWordsApp::touch_blank_select(int x, int y) {
     }
 }
 
-void TileWordsApp::touch_confirm_new(int x, int y) {
-    if (in_rect(layout_.popup_yes, x, y)) { new_game(true); queue_draw(); }
-    else if (in_rect(layout_.popup_no, x, y)) { game_.mode = Mode::Normal; queue_draw(); }
+void TileWordsApp::touch_new_setup(int x, int y) {
+    if (in_rect(layout_.setup_cancel, x, y)) {
+        game_.mode = Mode::Normal;
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.setup_start, x, y)) {
+        game_.player_count = std::max(2, std::min(MAX_PLAYERS, game_.setup_player_count));
+        game_.cpu = game_.setup_cpu;
+        game_.procedural_board = game_.setup_procedural_board;
+        for (int i = game_.player_count; i < MAX_PLAYERS; ++i) game_.cpu[i] = false;
+        new_game(true);
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.setup_players, x, y)) {
+        game_.setup_player_count++;
+        if (game_.setup_player_count > MAX_PLAYERS) game_.setup_player_count = 2;
+        for (int i = game_.setup_player_count; i < MAX_PLAYERS; ++i) game_.setup_cpu[i] = false;
+        queue_draw();
+        return;
+    }
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        if (i < game_.setup_player_count && in_rect(layout_.setup_player_type[i], x, y)) {
+            game_.setup_cpu[i] = !game_.setup_cpu[i];
+            queue_draw();
+            return;
+        }
+    }
+    if (in_rect(layout_.setup_tile_limit, x, y)) {
+        if (game_.tile_limit_option == 100) game_.tile_limit_option = 75;
+        else if (game_.tile_limit_option == 75) game_.tile_limit_option = 50;
+        else game_.tile_limit_option = 100;
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.setup_board_size, x, y)) {
+        game_.setup_procedural_board = !game_.setup_procedural_board;
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.setup_custom_board, x, y)) {
+        if (game_.starter_letters_option == 0) game_.starter_letters_option = 10;
+        else game_.starter_letters_option = 0;
+        queue_draw();
+        return;
+    }
 }
 
 void TileWordsApp::touch_settings(int x, int y) {
@@ -867,6 +1053,93 @@ Rect TileWordsApp::board_cell_rect(int row, int col) const {
     return {layout_.board.x + col * layout_.cell, layout_.board.y + row * layout_.cell, layout_.cell, layout_.cell};
 }
 
+Premium TileWordsApp::cell_premium(int row, int col) const {
+    if (row < 0 || row >= BOARD_N || col < 0 || col >= BOARD_N) return Premium::None;
+    return game_.premiums[row][col];
+}
+
+void TileWordsApp::setup_premiums() {
+    for (int r = 0; r < BOARD_N; ++r) {
+        for (int c = 0; c < BOARD_N; ++c) game_.premiums[r][c] = Premium::None;
+    }
+
+    if (!game_.procedural_board) {
+        for (int r = 0; r < BOARD_N; ++r) {
+            for (int c = 0; c < BOARD_N; ++c) game_.premiums[r][c] = standard_premium_at(r, c);
+        }
+        return;
+    }
+
+    game_.premiums[7][7] = Premium::Star;
+    std::vector<std::pair<int,int>> cells;
+    cells.reserve(BOARD_N * BOARD_N - 1);
+    for (int r = 0; r < BOARD_N; ++r) {
+        for (int c = 0; c < BOARD_N; ++c) {
+            if (r == 7 && c == 7) continue;
+            cells.push_back({r, c});
+        }
+    }
+    for (int i = static_cast<int>(cells.size()) - 1; i > 0; --i) {
+        int j = std::rand() % (i + 1);
+        std::swap(cells[i], cells[j]);
+    }
+
+    size_t pos = 0;
+    auto assign = [&](Premium p, int count) {
+        for (int i = 0; i < count && pos < cells.size(); ++i, ++pos) {
+            game_.premiums[cells[pos].first][cells[pos].second] = p;
+        }
+    };
+    assign(Premium::TW, 8);
+    assign(Premium::DW, 16);
+    assign(Premium::TL, 12);
+    assign(Premium::DL, 24);
+}
+
+bool TileWordsApp::can_place_starter_at(int row, int col) const {
+    if (row <= 0 || row >= BOARD_N - 1 || col <= 0 || col >= BOARD_N - 1) return false;
+    if (row == 7 && col == 7) return false;
+    if (game_.board[row][col].ch) return false;
+    for (int dr = -1; dr <= 1; ++dr) {
+        for (int dc = -1; dc <= 1; ++dc) {
+            if (dr == 0 && dc == 0) continue;
+            int rr = row + dr;
+            int cc = col + dc;
+            if (rr >= 0 && rr < BOARD_N && cc >= 0 && cc < BOARD_N && game_.board[rr][cc].ch) return false;
+        }
+    }
+    return true;
+}
+
+void TileWordsApp::place_starter_letters() {
+    int target = std::max(0, std::min(30, game_.starter_letters_option));
+    if (target <= 0) return;
+
+    std::vector<std::pair<int,int>> cells;
+    cells.reserve(BOARD_N * BOARD_N);
+    for (int r = 1; r < BOARD_N - 1; ++r) {
+        for (int c = 1; c < BOARD_N - 1; ++c) {
+            if (r == 7 && c == 7) continue;
+            cells.push_back({r, c});
+        }
+    }
+    for (int i = static_cast<int>(cells.size()) - 1; i > 0; --i) {
+        int j = std::rand() % (i + 1);
+        std::swap(cells[i], cells[j]);
+    }
+
+    int placed = 0;
+    for (auto [r, c] : cells) {
+        if (placed >= target || game_.bag.empty()) break;
+        if (!can_place_starter_at(r, c)) continue;
+        Tile t = draw_tile();
+        if (!t.ch || t.blank) continue;
+        game_.board[r][c] = Cell{t.ch, true, false, -1};
+        ++placed;
+    }
+    app_log("newgame: placed " + std::to_string(placed) + " starter letters");
+}
+
 void TileWordsApp::quit() {
     app_log("quit: save and gtk_main_quit");
     save_game();
@@ -884,18 +1157,45 @@ Tile TileWordsApp::draw_tile() {
 void TileWordsApp::new_game(bool reset_scores) {
     bool keep_ai = game_.ai_enabled;
     int keep_tile_scale = game_.tile_scale;
+    int keep_players = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
+    auto keep_cpu = game_.cpu;
+    int keep_tile_limit = game_.tile_limit_option;
+    bool keep_procedural_board = game_.procedural_board;
+    int keep_starter_letters = game_.starter_letters_option;
+
     game_ = Game{};
     game_.ai_enabled = keep_ai;
     game_.tile_scale = std::max(80, std::min(140, keep_tile_scale));
-    if (!reset_scores) game_.scores = {{0,0}};
+    game_.player_count = keep_players;
+    game_.setup_player_count = keep_players;
+    game_.cpu = keep_cpu;
+    for (int i = game_.player_count; i < MAX_PLAYERS; ++i) game_.cpu[i] = false;
+    game_.setup_cpu = game_.cpu;
+    game_.tile_limit_option = keep_tile_limit;
+    game_.procedural_board = keep_procedural_board;
+    game_.setup_procedural_board = keep_procedural_board;
+    game_.starter_letters_option = keep_starter_letters;
+    if (!reset_scores) game_.scores = {{0,0,0,0}};
+
     const char* letters =
         "AAAAAAAAA" "BB" "CC" "DDDD" "EEEEEEEEEEEE" "FF" "GGG" "HH" "IIIIIIIII"
         "J" "K" "LLLL" "MM" "NNNNNN" "OOOOOOOO" "PP" "Q" "RRRRRR" "SSSS"
         "TTTTTT" "UUUU" "VV" "WW" "X" "YY" "Z" "??";
     for (const char* p = letters; *p; ++p) game_.bag.push_back(Tile{*p, *p == '?'});
+
     std::srand(static_cast<unsigned>(std::time(nullptr)));
-    refill_rack(0);
-    refill_rack(1);
+    for (int i = static_cast<int>(game_.bag.size()) - 1; i > 0; --i) {
+        int j = std::rand() % (i + 1);
+        std::swap(game_.bag[i], game_.bag[j]);
+    }
+    if (game_.tile_limit_option > 0 && game_.tile_limit_option < static_cast<int>(game_.bag.size())) {
+        game_.bag.resize(game_.tile_limit_option);
+    }
+
+    setup_premiums();
+    place_starter_letters();
+
+    for (int p = 0; p < game_.player_count; ++p) refill_rack(p);
     game_.mode = Mode::Normal;
     save_game();
 }
@@ -1041,16 +1341,27 @@ void TileWordsApp::save_game() {
     out << "{\n";
     out << "  \"version\": 1,\n";
     out << "  \"current_player\": " << game_.current << ",\n";
-    out << "  \"score0\": " << game_.scores[0] << ",\n";
-    out << "  \"score1\": " << game_.scores[1] << ",\n";
+    out << "  \"player_count\": " << game_.player_count << ",\n";
+    for (int p = 0; p < MAX_PLAYERS; ++p) out << "  \"score" << p << "\": " << game_.scores[p] << ",\n";
+    for (int p = 0; p < MAX_PLAYERS; ++p) out << "  \"cpu" << p << "\": " << (game_.cpu[p] ? 1 : 0) << ",\n";
     out << "  \"handoff\": " << (game_.mode == Mode::Handoff ? 1 : 0) << ",\n";
     out << "  \"game_over\": " << (game_.game_over ? 1 : 0) << ",\n";
     out << "  \"ai_enabled\": " << (game_.ai_enabled ? 1 : 0) << ",\n";
     out << "  \"tile_scale\": " << game_.tile_scale << ",\n";
+    out << "  \"tile_limit_option\": " << game_.tile_limit_option << ",\n";
+    out << "  \"procedural_board\": " << (game_.procedural_board ? 1 : 0) << ",\n";
+    out << "  \"starter_letters_option\": " << game_.starter_letters_option << ",\n";
+    out << "  \"premiumboard\": [\n";
+    for (int r = 0; r < BOARD_N; ++r) {
+        out << "    \"";
+        for (int c = 0; c < BOARD_N; ++c) out << premium_to_char(game_.premiums[r][c]);
+        out << "\"" << (r == BOARD_N - 1 ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
     out << "  \"bag\": \"";
     for (const auto& t : game_.bag) out << t.ch;
     out << "\",\n";
-    for (int p = 0; p < 2; ++p) {
+    for (int p = 0; p < MAX_PLAYERS; ++p) {
         out << "  \"rack" << p << "\": \"";
         for (int i = 0; i < RACK_N; ++i) out << (game_.racks[p][i].ch ? game_.racks[p][i].ch : '.');
         out << "\",\n";
@@ -1082,17 +1393,25 @@ bool TileWordsApp::load_game() {
     if (src.find("version") == std::string::npos) return false;
 
     Game loaded;
-    loaded.current = std::max(0, std::min(1, json_int_value(src, "current_player", 0)));
-    loaded.scores[0] = json_int_value(src, "score0", 0);
-    loaded.scores[1] = json_int_value(src, "score1", 0);
+    loaded.player_count = std::max(2, std::min(MAX_PLAYERS, json_int_value(src, "player_count", 2)));
+    loaded.current = std::max(0, std::min(loaded.player_count - 1, json_int_value(src, "current_player", 0)));
+    for (int p = 0; p < MAX_PLAYERS; ++p) loaded.scores[p] = json_int_value(src, "score" + std::to_string(p), 0);
+    for (int p = 0; p < MAX_PLAYERS; ++p) loaded.cpu[p] = json_int_value(src, "cpu" + std::to_string(p), 0) != 0;
+    for (int p = loaded.player_count; p < MAX_PLAYERS; ++p) loaded.cpu[p] = false;
+    loaded.setup_player_count = loaded.player_count;
+    loaded.setup_cpu = loaded.cpu;
     loaded.game_over = json_int_value(src, "game_over", 0) != 0;
     loaded.ai_enabled = json_int_value(src, "ai_enabled", 0) != 0;
     loaded.tile_scale = std::max(80, std::min(140, json_int_value(src, "tile_scale", 100)));
+    loaded.tile_limit_option = json_int_value(src, "tile_limit_option", 100);
+    loaded.procedural_board = json_int_value(src, "procedural_board", 0) != 0;
+    loaded.setup_procedural_board = loaded.procedural_board;
+    loaded.starter_letters_option = json_int_value(src, "starter_letters_option", 0);
     loaded.mode = loaded.game_over ? Mode::GameOver : (json_int_value(src, "handoff", 0) ? Mode::Handoff : Mode::Normal);
 
     std::string bag = json_string_value(src, "bag");
     for (char c : bag) if (c && c != '.') loaded.bag.push_back(Tile{c, c == '?'});
-    for (int p = 0; p < 2; ++p) {
+    for (int p = 0; p < MAX_PLAYERS; ++p) {
         std::string rack = json_string_value(src, "rack" + std::to_string(p));
         std::string blanks = json_string_value(src, "rackblank" + std::to_string(p));
         for (int i = 0; i < RACK_N && i < static_cast<int>(rack.size()); ++i) {
@@ -1129,6 +1448,27 @@ bool TileWordsApp::load_game() {
             pos = q + 1;
         }
     }
+    bool premium_loaded = false;
+    size_t pp = src.find("\"premiumboard\"");
+    if (pp != std::string::npos) {
+        size_t pos = src.find('[', pp);
+        premium_loaded = true;
+        for (int r = 0; r < BOARD_N && pos != std::string::npos; ++r) {
+            pos = src.find('"', pos + 1);
+            if (pos == std::string::npos) { premium_loaded = false; break; }
+            size_t q = src.find('"', pos + 1);
+            if (q == std::string::npos) { premium_loaded = false; break; }
+            std::string row = src.substr(pos + 1, q - pos - 1);
+            for (int c = 0; c < BOARD_N && c < static_cast<int>(row.size()); ++c) loaded.premiums[r][c] = premium_from_char(row[c]);
+            pos = q + 1;
+        }
+    }
+    if (!premium_loaded) {
+        for (int r = 0; r < BOARD_N; ++r) {
+            for (int c = 0; c < BOARD_N; ++c) loaded.premiums[r][c] = standard_premium_at(r, c);
+        }
+    }
+
     game_ = loaded;
     return true;
 }
@@ -1146,11 +1486,11 @@ void TileWordsApp::pass_turn() {
     for (auto [r, c] : placed_cells()) return_temp_tile(r, c);
     game_.selected_rack = -1;
     game_.pass_count++;
-    if (game_.pass_count >= 6) {
+    if (game_.pass_count >= game_.player_count * 3) {
         game_.game_over = true;
         game_.mode = Mode::GameOver;
     } else {
-        game_.current = 1 - game_.current;
+        advance_to_next_player();
         enter_handoff();
     }
     save_game();
@@ -1171,9 +1511,19 @@ void TileWordsApp::exchange_tiles() {
     game_.exchange_selected.fill(false);
     game_.selected_rack = -1;
     game_.pass_count = 0;
-    game_.current = 1 - game_.current;
+    advance_to_next_player();
     enter_handoff();
     save_game();
+}
+
+int TileWordsApp::next_player_index() const {
+    int count = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
+    return (game_.current + 1) % count;
+}
+
+void TileWordsApp::advance_to_next_player() {
+    game_.current = next_player_index();
+    game_.selected_rack = -1;
 }
 
 void TileWordsApp::enter_handoff() {
@@ -1229,7 +1579,7 @@ int TileWordsApp::score_word(const std::vector<std::pair<int,int>>& cells) const
         const Cell& cell = game_.board[r][c];
         int val = cell.blank ? 0 : letter_value(cell.ch);
         if (!cell.locked) {
-            Premium p = premium_at(r,c);
+            Premium p = cell_premium(r,c);
             if (p == Premium::DL) val *= 2;
             else if (p == Premium::TL) val *= 3;
             else if (p == Premium::DW || p == Premium::Star) wm *= 2;
@@ -1238,6 +1588,56 @@ int TileWordsApp::score_word(const std::vector<std::pair<int,int>>& cells) const
         sum += val;
     }
     return sum * wm;
+}
+
+int TileWordsApp::preview_score() const {
+    auto placed = placed_cells();
+    if (placed.empty()) return 0;
+
+    int minr = BOARD_N, maxr = -1, minc = BOARD_N, maxc = -1;
+    for (auto [r,c] : placed) { minr = std::min(minr,r); maxr = std::max(maxr,r); minc = std::min(minc,c); maxc = std::max(maxc,c); }
+    bool same_row = minr == maxr;
+    bool same_col = minc == maxc;
+    if (!same_row && !same_col) return 0;
+
+    int dr = 0, dc = 0;
+    if (same_row && !same_col) { dr = 0; dc = 1; }
+    else if (same_col && !same_row) { dr = 1; dc = 0; }
+    else {
+        int r = placed[0].first, c = placed[0].second;
+        bool horiz = (c > 0 && game_.board[r][c-1].ch) || (c < BOARD_N-1 && game_.board[r][c+1].ch);
+        bool vert = (r > 0 && game_.board[r-1][c].ch) || (r < BOARD_N-1 && game_.board[r+1][c].ch);
+        if (horiz) { dr = 0; dc = 1; }
+        else if (vert) { dr = 1; dc = 0; }
+        else { dr = 0; dc = 1; }
+    }
+
+    if (placed.size() > 1) {
+        if (dr == 0) {
+            for (int c = minc; c <= maxc; ++c) if (!game_.board[minr][c].ch) return 0;
+        } else {
+            for (int r = minr; r <= maxr; ++r) if (!game_.board[r][minc].ch) return 0;
+        }
+    }
+
+    auto collect_cells = [&](int r, int c, int adr, int adc) {
+        while (r - adr >= 0 && r - adr < BOARD_N && c - adc >= 0 && c - adc < BOARD_N && game_.board[r-adr][c-adc].ch) { r -= adr; c -= adc; }
+        std::vector<std::pair<int,int>> cells;
+        while (r >= 0 && r < BOARD_N && c >= 0 && c < BOARD_N && game_.board[r][c].ch) { cells.push_back({r,c}); r += adr; c += adc; }
+        return cells;
+    };
+
+    int total = 0;
+    auto main_cells = collect_cells(placed[0].first, placed[0].second, dr, dc);
+    if (main_cells.size() > 1) total += score_word(main_cells);
+
+    int cross_dr = dc, cross_dc = dr;
+    for (auto [r,c] : placed) {
+        auto cross = collect_cells(r, c, cross_dr, cross_dc);
+        if (cross.size() > 1) total += score_word(cross);
+    }
+    if (placed.size() == RACK_N && total > 0) total += BINGO_BONUS;
+    return total;
 }
 
 MoveResult TileWordsApp::validate_and_score() {
@@ -1337,7 +1737,7 @@ void TileWordsApp::lock_placed_and_score(int score) {
         for (const auto& t : game_.racks[game_.current]) if (t.ch) empty_rack = false;
         if (empty_rack) { game_.game_over = true; game_.mode = Mode::GameOver; return; }
     }
-    game_.current = 1 - game_.current;
+    advance_to_next_player();
     enter_handoff();
 }
 
