@@ -42,6 +42,20 @@ static bool in_rect(const Rect& r, int px, int py) {
     return px >= r.x && py >= r.y && px < r.x + r.w && py < r.y + r.h;
 }
 
+static bool rect_intersects(const Rect& a, const Rect& b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+static Rect rect_intersection(const Rect& a, const Rect& b) {
+    int x1 = std::max(a.x, b.x);
+    int y1 = std::max(a.y, b.y);
+    int x2 = std::min(a.x + a.w, b.x + b.w);
+    int y2 = std::min(a.y + a.h, b.y + b.h);
+    if (x2 <= x1 || y2 <= y1) return Rect{};
+    return {x1, y1, x2 - x1, y2 - y1};
+}
+
 struct Tile { char ch = 0; bool blank = false; };
 struct Cell { char ch = 0; bool locked = false; bool blank = false; int rack_index = -1; };
 
@@ -101,6 +115,8 @@ private:
     std::string home_;
     std::string save_path_;
     std::string dict_path_;
+    std::vector<Rect> dirty_rects_;
+    bool full_redraw_pending_ = true;
 
     static gboolean on_draw(GtkWidget* widget, GdkEventExpose* event, gpointer data);
     static gboolean on_button(GtkWidget* widget, GdkEventButton* event, gpointer data);
@@ -309,25 +325,57 @@ int TileWordsApp::run() {
     return 0;
 }
 
-gboolean TileWordsApp::on_draw(GtkWidget* widget, GdkEventExpose*, gpointer data) {
+gboolean TileWordsApp::on_draw(GtkWidget* widget, GdkEventExpose* event, gpointer data) {
     static bool first = true;
     auto* app = static_cast<TileWordsApp*>(data);
     GdkWindow* win = gtk_widget_get_window(widget);
     if (!win) { app_log("draw: missing gdk window"); return TRUE; }
-    cairo_t* cr = gdk_cairo_create(win);
+
     GtkAllocation alloc;
     gtk_widget_get_allocation(widget, &alloc);
     if (alloc.width <= 0 || alloc.height <= 0) {
         alloc.width = gdk_screen_width();
         alloc.height = gdk_screen_height();
     }
-    if (first) { app_log("draw: first expose"); first = false; }
     app->compute_layout(alloc.width, alloc.height);
-    app->draw(cr, alloc.width, alloc.height);
+
+    Rect expose{0, 0, alloc.width, alloc.height};
+    if (event) expose = {event->area.x, event->area.y, event->area.width, event->area.height};
+
+    std::vector<Rect> paint_rects;
+    if (first || app->full_redraw_pending_) {
+        paint_rects.push_back(expose);
+        if (first) { app_log("draw: first expose"); first = false; }
+        app->full_redraw_pending_ = false;
+        app->dirty_rects_.clear();
+    } else if (!app->dirty_rects_.empty()) {
+        std::vector<Rect> remaining;
+        for (const Rect& dirty : app->dirty_rects_) {
+            Rect clipped = rect_intersection(dirty, expose);
+            if (clipped.w > 0 && clipped.h > 0) {
+                paint_rects.push_back(clipped);
+            } else {
+                remaining.push_back(dirty);
+            }
+        }
+        app->dirty_rects_.swap(remaining);
+    } else {
+        return TRUE;
+    }
+
+    if (paint_rects.empty()) return TRUE;
+
+    cairo_t* cr = gdk_cairo_create(win);
+    for (const Rect& r : paint_rects) {
+        cairo_save(cr);
+        cairo_rectangle(cr, r.x, r.y, r.w, r.h);
+        cairo_clip(cr);
+        app->draw(cr, alloc.width, alloc.height);
+        cairo_restore(cr);
+    }
     cairo_destroy(cr);
     return TRUE;
 }
-
 gboolean TileWordsApp::on_button(GtkWidget*, GdkEventButton* event, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
     if (event->type == GDK_BUTTON_PRESS) app->touch(static_cast<int>(event->x), static_cast<int>(event->y));
@@ -655,16 +703,36 @@ void TileWordsApp::touch_confirm_new(int x, int y) {
 }
 
 void TileWordsApp::queue_draw() {
-    if (window_) gtk_widget_queue_draw(window_);
+    if (!window_) return;
+    full_redraw_pending_ = true;
+    dirty_rects_.clear();
+    gtk_widget_queue_draw(window_);
 }
 
 void TileWordsApp::queue_draw_rect(const Rect& r) {
     if (!window_) return;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(window_, &alloc);
+    if (alloc.width <= 0 || alloc.height <= 0) {
+        alloc.width = gdk_screen_width();
+        alloc.height = gdk_screen_height();
+    }
     int x = std::max(0, r.x - 6);
     int y = std::max(0, r.y - 6);
-    int w = r.w + 12;
-    int h = r.h + 12;
-    gtk_widget_queue_draw_area(window_, x, y, w, h);
+    int w = std::min(alloc.width - x, r.w + 12);
+    int h = std::min(alloc.height - y, r.h + 12);
+    if (w <= 0 || h <= 0) return;
+
+    Rect dirty{x, y, w, h};
+    dirty_rects_.push_back(dirty);
+
+    GdkWindow* win = gtk_widget_get_window(window_);
+    if (win) {
+        GdkRectangle gr{dirty.x, dirty.y, dirty.w, dirty.h};
+        gdk_window_invalidate_rect(win, &gr, FALSE);
+    } else {
+        gtk_widget_queue_draw_area(window_, dirty.x, dirty.y, dirty.w, dirty.h);
+    }
 }
 
 void TileWordsApp::queue_draw_rack() {
