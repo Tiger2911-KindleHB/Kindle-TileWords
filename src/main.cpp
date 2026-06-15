@@ -10,6 +10,8 @@
 #include <ctime>
 #include <fstream>
 #include <csignal>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <set>
 #include <sstream>
 #include <string>
@@ -189,6 +191,22 @@ static std::string upper_word(std::string s) {
     }
     return out;
 }
+
+static std::string lower_string(std::string s) {
+    for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+static bool ends_with_ci(const std::string& s, const std::string& suffix) {
+    if (suffix.size() > s.size()) return false;
+    return lower_string(s.substr(s.size() - suffix.size())) == lower_string(suffix);
+}
+
+static bool file_exists_readable(const std::string& path) {
+    std::ifstream in(path);
+    return static_cast<bool>(in);
+}
+
 
 static int letter_value(char c) {
     switch (std::toupper(static_cast<unsigned char>(c))) {
@@ -899,9 +917,46 @@ void TileWordsApp::load_dictionary() {
         }
     };
 
-    // Kindle/Linux paths are case-sensitive. Load every recognized dictionary
-    // filename instead of stopping at the first one, so a user replacement named
-    // Dictionary.txt is honored even if the bundled dictionary.txt still exists.
+    auto scan_data_dir = [&](const std::string& dir) {
+        DIR* d = opendir(dir.c_str());
+        if (!d) {
+            app_log("dictionary: cannot scan " + dir);
+            return;
+        }
+
+        int added = 0;
+        while (dirent* ent = readdir(d)) {
+            std::string name = ent->d_name ? ent->d_name : "";
+            if (name.empty() || name == "." || name == "..") continue;
+
+            // Load every .txt file in the data folder, not just dictionary.txt.
+            // This avoids Kindle/MTP case and rename problems: Dictionary.txt,
+            // dictionary.txt, wordlist.txt, NWL.txt, etc. all work.
+            if (!ends_with_ci(name, ".txt")) continue;
+
+            std::string path = dir + "/" + name;
+            add_candidate(path);
+            ++added;
+        }
+        closedir(d);
+        app_log("dictionary: scanned " + dir + ", queued " + std::to_string(added) + " txt file(s)");
+    };
+
+    std::vector<std::string> data_dirs;
+    auto add_dir = [&](const std::string& dir) {
+        if (dir.empty()) return;
+        if (std::find(data_dirs.begin(), data_dirs.end(), dir) == data_dirs.end()) data_dirs.push_back(dir);
+    };
+
+    add_dir(home_ + "/data");
+    add_dir("/mnt/us/extensions/tilewords/data");
+    add_dir("/mnt/us/extensions/TileWords/data");
+    add_dir("./data");
+
+    for (const std::string& dir : data_dirs) scan_data_dir(dir);
+
+    // Explicit fallbacks. These also make the log obvious if the data folder
+    // cannot be scanned on a specific Kindle build.
     add_candidate(home_ + "/data/Dictionary.txt");
     add_candidate(home_ + "/data/dictionary.txt");
     add_candidate(home_ + "/data/DICTIONARY.TXT");
@@ -910,6 +965,7 @@ void TileWordsApp::load_dictionary() {
     add_candidate(dict_path_);
     add_candidate("/mnt/us/extensions/tilewords/data/Dictionary.txt");
     add_candidate("/mnt/us/extensions/tilewords/data/dictionary.txt");
+    add_candidate("/mnt/us/extensions/tilewords/data/DICTIONARY.TXT");
     add_candidate("/mnt/us/extensions/TileWords/data/Dictionary.txt");
     add_candidate("/mnt/us/extensions/TileWords/data/dictionary.txt");
     add_candidate("./data/Dictionary.txt");
@@ -926,28 +982,34 @@ void TileWordsApp::load_dictionary() {
 
         const size_t before = dictionary_.size();
         int file_lines = 0;
+        int accepted_lines = 0;
         std::string line;
         while (std::getline(in, line)) {
             ++file_lines;
             std::string w = upper_word(line);
-            if (w.size() >= 2 && w.size() <= 15) dictionary_.insert(w);
+            if (w.size() >= 2 && w.size() <= 15) {
+                dictionary_.insert(w);
+                ++accepted_lines;
+            }
         }
 
         ++files_loaded;
         total_lines += file_lines;
         const size_t added = dictionary_.size() - before;
         app_log("dictionary: read " + std::to_string(file_lines) +
-                " lines, added " + std::to_string(added) +
-                " words from " + path);
+                " lines, accepted " + std::to_string(accepted_lines) +
+                ", added " + std::to_string(added) +
+                " unique words from " + path);
     }
 
     if (files_loaded == 0) {
-        app_log("dictionary: no dictionary file found; expected " + dict_path_);
+        app_log("dictionary: no dictionary txt file found in data folders; expected " + dict_path_);
     } else {
         app_log("dictionary: total " + std::to_string(dictionary_.size()) +
-                " words from " + std::to_string(files_loaded) +
+                " unique words from " + std::to_string(files_loaded) +
                 " file(s), " + std::to_string(total_lines) +
-                " lines; TOOK=" + (dictionary_.find("TOOK") != dictionary_.end() ? "yes" : "no"));
+                " lines; TOOK=" + (dictionary_.find("TOOK") != dictionary_.end() ? "yes" : "no") +
+                "; ALL=" + (dictionary_.find("ALL") != dictionary_.end() ? "yes" : "no"));
     }
 }
 
