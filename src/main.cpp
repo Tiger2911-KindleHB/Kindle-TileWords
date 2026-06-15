@@ -892,30 +892,62 @@ void TileWordsApp::load_dictionary() {
     dictionary_.clear();
 
     std::vector<std::string> candidates;
-    candidates.push_back(dict_path_);
-    candidates.push_back(home_ + "/dictionary.txt");
-    candidates.push_back("/mnt/us/extensions/tilewords/data/dictionary.txt");
-    candidates.push_back("/mnt/us/extensions/TileWords/data/dictionary.txt");
-    candidates.push_back("./data/dictionary.txt");
+    auto add_candidate = [&](const std::string& path) {
+        if (path.empty()) return;
+        if (std::find(candidates.begin(), candidates.end(), path) == candidates.end()) {
+            candidates.push_back(path);
+        }
+    };
 
-    std::string used_path;
+    // Kindle/Linux paths are case-sensitive. Load every recognized dictionary
+    // filename instead of stopping at the first one, so a user replacement named
+    // Dictionary.txt is honored even if the bundled dictionary.txt still exists.
+    add_candidate(home_ + "/data/Dictionary.txt");
+    add_candidate(home_ + "/data/dictionary.txt");
+    add_candidate(home_ + "/data/DICTIONARY.TXT");
+    add_candidate(home_ + "/Dictionary.txt");
+    add_candidate(home_ + "/dictionary.txt");
+    add_candidate(dict_path_);
+    add_candidate("/mnt/us/extensions/tilewords/data/Dictionary.txt");
+    add_candidate("/mnt/us/extensions/tilewords/data/dictionary.txt");
+    add_candidate("/mnt/us/extensions/TileWords/data/Dictionary.txt");
+    add_candidate("/mnt/us/extensions/TileWords/data/dictionary.txt");
+    add_candidate("./data/Dictionary.txt");
+    add_candidate("./data/dictionary.txt");
+
+    int files_loaded = 0;
+    int total_lines = 0;
     for (const std::string& path : candidates) {
         std::ifstream in(path);
-        if (!in) continue;
+        if (!in) {
+            app_log("dictionary: not found " + path);
+            continue;
+        }
 
-        used_path = path;
+        const size_t before = dictionary_.size();
+        int file_lines = 0;
         std::string line;
         while (std::getline(in, line)) {
+            ++file_lines;
             std::string w = upper_word(line);
-            if (w.size() >= 2) dictionary_.insert(w);
+            if (w.size() >= 2 && w.size() <= 15) dictionary_.insert(w);
         }
-        break;
+
+        ++files_loaded;
+        total_lines += file_lines;
+        const size_t added = dictionary_.size() - before;
+        app_log("dictionary: read " + std::to_string(file_lines) +
+                " lines, added " + std::to_string(added) +
+                " words from " + path);
     }
 
-    if (used_path.empty()) {
+    if (files_loaded == 0) {
         app_log("dictionary: no dictionary file found; expected " + dict_path_);
     } else {
-        app_log("dictionary: loaded " + std::to_string(dictionary_.size()) + " words from " + used_path);
+        app_log("dictionary: total " + std::to_string(dictionary_.size()) +
+                " words from " + std::to_string(files_loaded) +
+                " file(s), " + std::to_string(total_lines) +
+                " lines; TOOK=" + (dictionary_.find("TOOK") != dictionary_.end() ? "yes" : "no"));
     }
 }
 
