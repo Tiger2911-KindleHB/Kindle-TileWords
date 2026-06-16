@@ -549,34 +549,36 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
 }
 
 void TileWordsApp::compute_layout(int w, int h) {
-    int top_h = std::max(164, h / 8 + 28);
-    int bottom_h = std::max(265, h / 4);
+    // Gameplay layout tuned for Kindle: larger board first, then rack/buttons.
+    int top_h = std::max(128, h / 10 + 6);
+    int bottom_h = std::max(318, h / 5 + 42);
 
     int top_gap = 8;
-    int top_btn_h = std::max(50, std::min(62, h / 22));
-    int new_w = std::max(92, std::min(116, w / 9));
-    int settings_w = std::max(144, std::min(168, w / 6));
-    int exit_w = std::max(92, std::min(116, w / 9));
+    int top_btn_h = std::max(48, std::min(58, h / 24));
+    int new_w = std::max(92, std::min(112, w / 10));
+    int settings_w = std::max(150, std::min(174, w / 6));
+    int exit_w = std::max(92, std::min(112, w / 10));
     layout_.top_exit = {w - top_gap - exit_w, 8, exit_w, top_btn_h};
     layout_.top_settings = {layout_.top_exit.x - top_gap - settings_w, 8, settings_w, top_btn_h};
     layout_.top_new = {layout_.top_settings.x - top_gap - new_w, 8, new_w, top_btn_h};
 
-    int board_size = std::min(w - 170, h - top_h - bottom_h - 20);
+    int board_size = std::min(w - 118, h - top_h - bottom_h - 8);
     layout_.cell = std::max(28, board_size / BOARD_N);
     board_size = layout_.cell * BOARD_N;
-    layout_.board = {(w - board_size) / 2, top_h + 4, board_size, board_size};
+    layout_.board = {(w - board_size) / 2, top_h + 2, board_size, board_size};
 
-    int rack_tile = std::min((w - 140) / RACK_N, std::max(92, h / 12));
-    int rack_y = std::min(h - rack_tile - std::max(76, h / 16) - 14, layout_.board.y + layout_.board.h + 14);
+    int rack_tile = std::min((w - 118) / RACK_N, std::max(94, h / 12));
+    int btn_h = std::max(72, std::min(90, h / 16));
+    int rack_y = std::min(h - rack_tile - btn_h - 24, layout_.board.y + layout_.board.h + 12);
     rack_y = std::max(layout_.board.y + layout_.board.h + 8, rack_y);
     int rack_x = (w - rack_tile * RACK_N) / 2;
     for (int i = 0; i < RACK_N; ++i) layout_.rack[i] = {rack_x + i * rack_tile, rack_y, rack_tile - 5, rack_tile - 5};
 
-    int btn_y = rack_y + rack_tile + 8;
-    int btn_h = std::max(56, h / 20);
-    int gap = std::max(6, w / 130);
-    int value_w = std::max(142, std::min(180, w / 6));
-    int bw = std::min(142, (w - 70 - value_w - 4 * gap) / 4);
+    int btn_y = rack_y + rack_tile + 10;
+    int gap = std::max(7, w / 120);
+    int value_w = std::max(160, std::min(198, w / 5));
+    int bw = std::min(158, (w - 44 - value_w - 4 * gap) / 4);
+    bw = std::max(132, bw);
     int total_w = 4 * bw + value_w + 4 * gap;
     int x = std::max(12, (w - total_w) / 2);
     layout_.btn_submit = {x, btn_y, bw, btn_h}; x += bw + gap;
