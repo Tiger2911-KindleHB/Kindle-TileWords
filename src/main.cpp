@@ -88,6 +88,7 @@ struct Game {
     bool game_over = false;
     bool ai_enabled = false;
     int tile_scale = 100;
+    int board_cell_tune = 0; // test-only: per-cell pixel adjustment, logged for final tuning
     int tile_limit_option = 100;
     bool procedural_board = false;
     bool setup_procedural_board = false;
@@ -114,6 +115,7 @@ struct Layout {
     Rect btn_settings_ai;
     Rect btn_settings_minus;
     Rect btn_settings_plus;
+    Rect btn_settings_grid_value;
     Rect btn_settings_placeholder1;
     Rect btn_settings_placeholder2;
     Rect btn_settings_back;
@@ -144,6 +146,10 @@ private:
     std::string dict_path_;
     std::vector<Rect> dirty_rects_;
     bool full_redraw_pending_ = true;
+    int last_logged_w_ = -1;
+    int last_logged_h_ = -1;
+    int last_logged_cell_ = -1;
+    int last_logged_tune_ = 9999;
 
     static gboolean on_draw(GtkWidget* widget, GdkEventExpose* event, gpointer data);
     static gboolean on_button(GtkWidget* widget, GdkEventButton* event, gpointer data);
@@ -151,6 +157,7 @@ private:
     static gboolean on_raise_timer(gpointer data);
 
     void compute_layout(int w, int h);
+    void log_grid_metrics(const char* reason, int w, int h);
     void draw(cairo_t* cr, int w, int h);
     void draw_normal(cairo_t* cr, int w, int h);
     void draw_handoff(cairo_t* cr, int w, int h);
@@ -563,7 +570,9 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.top_new = {layout_.top_settings.x - top_gap - new_w, 8, new_w, top_btn_h};
 
     int board_size = std::min(w - 118, h - top_h - bottom_h - 8);
-    layout_.cell = std::max(28, board_size / BOARD_N);
+    int base_cell = std::max(28, board_size / BOARD_N);
+    int tuned_cell = base_cell + game_.board_cell_tune;
+    layout_.cell = std::max(28, std::min(90, tuned_cell));
     board_size = layout_.cell * BOARD_N;
     layout_.board = {(w - board_size) / 2, top_h + 2, board_size, board_size};
 
@@ -591,23 +600,29 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.popup_yes = {w / 2 - 190, h * 62 / 100, 170, 70};
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
 
-    int settings_w2 = std::min(w * 4 / 5, 680);
-    int settings_h = std::min(h * 46 / 100, 390);
+    int settings_w2 = std::min(w * 4 / 5, 700);
+    int settings_h = std::min(h * 56 / 100, 520);
     int settings_x = (w - settings_w2) / 2;
     int settings_y = (h - settings_h) / 2;
     int inner_x = settings_x + 50;
     int inner_w = settings_w2 - 100;
     int settings_btn_h = std::max(54, h / 20);
-    int settings_gap = 18;
-    int first_y = settings_y + 90;
+    int settings_gap = 16;
+    int first_y = settings_y + 88;
 
     layout_.btn_settings_ai = {inner_x, first_y, inner_w, settings_btn_h};
+    int grid_y = first_y + settings_btn_h + settings_gap;
+    int grid_gap = 12;
+    int side_w = std::max(126, inner_w / 4);
+    int mid_w = inner_w - side_w * 2 - grid_gap * 2;
+    layout_.btn_settings_minus = {inner_x, grid_y, side_w, settings_btn_h};
+    layout_.btn_settings_grid_value = {inner_x + side_w + grid_gap, grid_y, mid_w, settings_btn_h};
+    layout_.btn_settings_plus = {layout_.btn_settings_grid_value.x + mid_w + grid_gap, grid_y, side_w, settings_btn_h};
+
     int half_w = (inner_w - settings_gap) / 2;
-    int future_y = first_y + settings_btn_h + settings_gap;
+    int future_y = grid_y + settings_btn_h + settings_gap;
     layout_.btn_settings_placeholder1 = {inner_x, future_y, half_w, settings_btn_h};
     layout_.btn_settings_placeholder2 = {inner_x + half_w + settings_gap, future_y, half_w, settings_btn_h};
-    layout_.btn_settings_minus = {0, 0, 0, 0};
-    layout_.btn_settings_plus = {0, 0, 0, 0};
     layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 100, future_y + settings_btn_h + settings_gap + 8, 200, settings_btn_h};
 
     int setup_w = std::min(w * 78 / 100, 780);
@@ -632,6 +647,27 @@ void TileWordsApp::compute_layout(int w, int h) {
     int action_y = setup_y + setup_h - row_h - 34;
     layout_.setup_start = {setup_x + setup_w / 2 - 230, action_y, 200, row_h};
     layout_.setup_cancel = {setup_x + setup_w / 2 + 30, action_y, 200, row_h};
+
+    if (w != last_logged_w_ || h != last_logged_h_ || layout_.cell != last_logged_cell_ || game_.board_cell_tune != last_logged_tune_) {
+        log_grid_metrics("layout", w, h);
+        last_logged_w_ = w;
+        last_logged_h_ = h;
+        last_logged_cell_ = layout_.cell;
+        last_logged_tune_ = game_.board_cell_tune;
+    }
+}
+
+void TileWordsApp::log_grid_metrics(const char* reason, int w, int h) {
+    std::ostringstream ss;
+    ss << "grid-test: " << reason
+       << " screen=" << w << "x" << h
+       << " tune=" << game_.board_cell_tune
+       << " cell_px=" << layout_.cell
+       << " board_px=" << layout_.board.w << "x" << layout_.board.h
+       << " board_xy=" << layout_.board.x << "," << layout_.board.y
+       << " rack_y=" << layout_.rack[0].y
+       << " buttons_y=" << layout_.btn_submit.y;
+    app_log(ss.str());
 }
 void TileWordsApp::draw(cairo_t* cr, int w, int h) {
     fill_rect(cr, {0,0,w,h}, 1.0);
@@ -847,6 +883,13 @@ void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
     centered_text(cr, {box.x, box.y + 22, box.w, 52}, "SETTINGS", 34, 0.0, true);
     draw_button(cr, layout_.btn_settings_ai, game_.ai_enabled ? "AI OPPONENT: ON" : "AI OPPONENT: OFF");
 
+    draw_button(cr, layout_.btn_settings_minus, "GRID -");
+    std::ostringstream gs;
+    gs << "GRID: " << layout_.cell << " px";
+    draw_button(cr, layout_.btn_settings_grid_value, gs.str());
+    draw_button(cr, layout_.btn_settings_plus, "GRID +");
+    centered_text(cr, {box.x + 20, layout_.btn_settings_plus.y + layout_.btn_settings_plus.h + 2, box.w - 40, 28}, "TEST SETTING: logs cell/board size to app.log", 18, 0.0, false);
+
     fill_rect(cr, layout_.btn_settings_placeholder1, 0.93);
     stroke_rect(cr, layout_.btn_settings_placeholder1, 0.0, 3.0);
     centered_text(cr, layout_.btn_settings_placeholder1, "FUTURE 1", std::max(18.0, layout_.btn_settings_placeholder1.h * 0.38), 0.45, true);
@@ -1032,6 +1075,20 @@ void TileWordsApp::touch_new_setup(int x, int y) {
 void TileWordsApp::touch_settings(int x, int y) {
     if (in_rect(layout_.btn_settings_back, x, y)) { game_.mode = Mode::Normal; save_game(); queue_draw(); return; }
     if (in_rect(layout_.btn_settings_ai, x, y)) { game_.ai_enabled = !game_.ai_enabled; save_game(); queue_draw(); return; }
+    if (in_rect(layout_.btn_settings_minus, x, y)) {
+        game_.board_cell_tune = std::max(-12, game_.board_cell_tune - 1);
+        save_game();
+        log_grid_metrics("grid-minus", gdk_screen_width(), gdk_screen_height());
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.btn_settings_plus, x, y)) {
+        game_.board_cell_tune = std::min(12, game_.board_cell_tune + 1);
+        save_game();
+        log_grid_metrics("grid-plus", gdk_screen_width(), gdk_screen_height());
+        queue_draw();
+        return;
+    }
 }
 
 void TileWordsApp::queue_draw() {
@@ -1185,6 +1242,7 @@ Tile TileWordsApp::draw_tile() {
 void TileWordsApp::new_game(bool reset_scores) {
     bool keep_ai = game_.ai_enabled;
     int keep_tile_scale = game_.tile_scale;
+    int keep_board_cell_tune = game_.board_cell_tune;
     int keep_players = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
     auto keep_cpu = game_.cpu;
     int keep_tile_limit = game_.tile_limit_option;
@@ -1194,6 +1252,7 @@ void TileWordsApp::new_game(bool reset_scores) {
     game_ = Game{};
     game_.ai_enabled = keep_ai;
     game_.tile_scale = std::max(80, std::min(140, keep_tile_scale));
+    game_.board_cell_tune = std::max(-12, std::min(12, keep_board_cell_tune));
     game_.player_count = keep_players;
     game_.setup_player_count = keep_players;
     game_.cpu = keep_cpu;
@@ -1376,6 +1435,7 @@ void TileWordsApp::save_game() {
     out << "  \"game_over\": " << (game_.game_over ? 1 : 0) << ",\n";
     out << "  \"ai_enabled\": " << (game_.ai_enabled ? 1 : 0) << ",\n";
     out << "  \"tile_scale\": " << game_.tile_scale << ",\n";
+    out << "  \"board_cell_tune\": " << game_.board_cell_tune << ",\n";
     out << "  \"tile_limit_option\": " << game_.tile_limit_option << ",\n";
     out << "  \"procedural_board\": " << (game_.procedural_board ? 1 : 0) << ",\n";
     out << "  \"starter_letters_option\": " << game_.starter_letters_option << ",\n";
@@ -1431,6 +1491,7 @@ bool TileWordsApp::load_game() {
     loaded.game_over = json_int_value(src, "game_over", 0) != 0;
     loaded.ai_enabled = json_int_value(src, "ai_enabled", 0) != 0;
     loaded.tile_scale = std::max(80, std::min(140, json_int_value(src, "tile_scale", 100)));
+    loaded.board_cell_tune = std::max(-12, std::min(12, json_int_value(src, "board_cell_tune", 0)));
     loaded.tile_limit_option = json_int_value(src, "tile_limit_option", 100);
     loaded.procedural_board = json_int_value(src, "procedural_board", 0) != 0;
     loaded.setup_procedural_board = loaded.procedural_board;
