@@ -652,17 +652,17 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.top_settings, "SETTINGS");
     draw_button(cr, layout_.top_exit, "EXIT");
 
-    Rect tiles_box{14, 20, 172, 42};
+    Rect tiles_box{14, 20, 232, 54};
     fill_rect(cr, tiles_box, 1.0);
     stroke_rect(cr, tiles_box, 0.0, 2.0);
     std::ostringstream ts;
     ts << "Tiles Left: " << pad3(static_cast<int>(game_.bag.size()));
-    centered_text(cr, tiles_box, ts.str(), 24, 0.0, false);
+    centered_text(cr, tiles_box, ts.str(), 30, 0.0, false);
 
     int pc = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
     int score_row_y = 92;
-    int score_row_h = 52;
-    int slot_w = pc >= 4 ? std::min(190, (w - 170) / pc) : std::min(260, (w - 260) / pc);
+    int score_row_h = 58;
+    int slot_w = pc >= 4 ? std::min(210, (w - 150) / pc) : std::min(280, (w - 240) / pc);
     slot_w = std::max(160, slot_w);
     int total_score_w = slot_w * pc;
     int score_x = (w - total_score_w) / 2;
@@ -674,7 +674,7 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
         }
         std::ostringstream ps;
         ps << (game_.cpu[i] ? "CPU " : "Player ") << (i + 1) << ": " << pad3(game_.scores[i]);
-        centered_text(cr, pr, ps.str(), 24, 0.0, false);
+        centered_text(cr, pr, ps.str(), pc >= 4 ? 27 : 31, 0.0, false);
     }
 
     for (int r = 0; r < BOARD_N; ++r) {
@@ -698,7 +698,7 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
                 else if (p == Premium::DW) lab = "2W";
                 else if (p == Premium::TW) lab = "3W";
                 else if (p == Premium::Star) lab = "*";
-                if (!lab.empty()) centered_text(cr, cell, lab, std::max(10, layout_.cell / 4), 0.0, true);
+                if (!lab.empty()) centered_text(cr, cell, lab, std::max(18, static_cast<int>(layout_.cell * 0.38)), 0.0, true);
             }
         }
     }
