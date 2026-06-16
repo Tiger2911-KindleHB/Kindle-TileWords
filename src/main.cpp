@@ -222,6 +222,14 @@ static std::string lower_string(std::string s) {
     return s;
 }
 
+
+static std::string pad3(int n) {
+    if (n < 0) n = 0;
+    if (n < 10) return "00" + std::to_string(n);
+    if (n < 100) return "0" + std::to_string(n);
+    return std::to_string(n);
+}
+
 static bool ends_with_ci(const std::string& s, const std::string& suffix) {
     if (suffix.size() > s.size()) return false;
     return lower_string(s.substr(s.size() - suffix.size())) == lower_string(suffix);
@@ -357,9 +365,25 @@ static void draw_tile_face(cairo_t* cr, const Rect& r, char ch, int value, bool 
 static void draw_button(cairo_t* cr, const Rect& r, const std::string& label, bool inverted = false) {
     fill_rect(cr, r, inverted ? 0.0 : 1.0);
     stroke_rect(cr, r, 0.0, 3.0);
-    centered_text(cr, r, label, std::max(18.0, std::min(32.0, r.h * 0.42)), inverted ? 1.0 : 0.0, true);
-}
+    if (label.empty()) return;
 
+    double fg = inverted ? 1.0 : 0.0;
+    double size = std::max(16.0, std::min(32.0, r.h * 0.42));
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_text_extents_t ext{};
+    do {
+        cairo_set_font_size(cr, size);
+        cairo_text_extents(cr, label.c_str(), &ext);
+        if (ext.width <= std::max(8, r.w - 14) && ext.height <= std::max(8, r.h - 10)) break;
+        size -= 1.0;
+    } while (size > 10.0);
+
+    set_gray(cr, fg);
+    double x = r.x + (r.w - ext.width) / 2.0 - ext.x_bearing;
+    double y = r.y + (r.h - ext.height) / 2.0 - ext.y_bearing;
+    cairo_move_to(cr, x, y);
+    cairo_show_text(cr, label.c_str());
+}
 bool TileWordsApp::init(int argc, char** argv) {
     const char* env_home = std::getenv("TILEWORDS_HOME");
     home_ = env_home && *env_home ? env_home : "/mnt/us/extensions/tilewords";
@@ -525,34 +549,34 @@ gboolean TileWordsApp::on_raise_timer(gpointer data) {
 }
 
 void TileWordsApp::compute_layout(int w, int h) {
-    int top_h = std::max(122, h / 8);
-    int bottom_h = std::max(245, h / 4);
+    int top_h = std::max(164, h / 8 + 28);
+    int bottom_h = std::max(265, h / 4);
 
     int top_gap = 8;
-    int top_btn_h = std::max(48, h / 20);
-    int new_w = std::max(94, std::min(126, w / 8));
-    int settings_w = std::max(150, std::min(178, w / 5));
-    int exit_w = std::max(94, std::min(126, w / 8));
+    int top_btn_h = std::max(50, std::min(62, h / 22));
+    int new_w = std::max(92, std::min(116, w / 9));
+    int settings_w = std::max(144, std::min(168, w / 6));
+    int exit_w = std::max(92, std::min(116, w / 9));
     layout_.top_exit = {w - top_gap - exit_w, 8, exit_w, top_btn_h};
     layout_.top_settings = {layout_.top_exit.x - top_gap - settings_w, 8, settings_w, top_btn_h};
     layout_.top_new = {layout_.top_settings.x - top_gap - new_w, 8, new_w, top_btn_h};
 
-    int board_size = std::min(w - 70, h - top_h - bottom_h - 20);
+    int board_size = std::min(w - 170, h - top_h - bottom_h - 20);
     layout_.cell = std::max(28, board_size / BOARD_N);
     board_size = layout_.cell * BOARD_N;
     layout_.board = {(w - board_size) / 2, top_h + 4, board_size, board_size};
 
-    int rack_tile = std::min((w - 70) / RACK_N, std::max(80, h / 11));
-    int rack_y = std::min(h - rack_tile - std::max(76, h / 16) - 16, layout_.board.y + layout_.board.h + 12);
-    rack_y = std::max(layout_.board.y + layout_.board.h + 6, rack_y);
+    int rack_tile = std::min((w - 140) / RACK_N, std::max(92, h / 12));
+    int rack_y = std::min(h - rack_tile - std::max(76, h / 16) - 14, layout_.board.y + layout_.board.h + 14);
+    rack_y = std::max(layout_.board.y + layout_.board.h + 8, rack_y);
     int rack_x = (w - rack_tile * RACK_N) / 2;
     for (int i = 0; i < RACK_N; ++i) layout_.rack[i] = {rack_x + i * rack_tile, rack_y, rack_tile - 5, rack_tile - 5};
 
     int btn_y = rack_y + rack_tile + 8;
-    int btn_h = std::max(58, h / 18);
-    int gap = std::max(8, w / 100);
-    int bw = std::min(150, (w - 80 - 4 * gap) / 5);
-    int value_w = std::min(170, std::max(130, bw + 18));
+    int btn_h = std::max(56, h / 20);
+    int gap = std::max(6, w / 130);
+    int value_w = std::max(142, std::min(180, w / 6));
+    int bw = std::min(142, (w - 70 - value_w - 4 * gap) / 4);
     int total_w = 4 * bw + value_w + 4 * gap;
     int x = std::max(12, (w - total_w) / 2);
     layout_.btn_submit = {x, btn_y, bw, btn_h}; x += bw + gap;
@@ -584,27 +608,29 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.btn_settings_plus = {0, 0, 0, 0};
     layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 100, future_y + settings_btn_h + settings_gap + 8, 200, settings_btn_h};
 
-    int setup_w = std::min(w * 86 / 100, 760);
-    int setup_h = std::min(h * 70 / 100, 660);
+    int setup_w = std::min(w * 78 / 100, 780);
+    int setup_h = std::min(h * 74 / 100, 780);
     int setup_x = (w - setup_w) / 2;
-    int setup_y = (h - setup_h) / 2;
-    int row_h = std::max(54, h / 19);
-    int row_gap = 14;
-    layout_.setup_players = {setup_x + 42, setup_y + 92, setup_w - 84, row_h};
-    int py = setup_y + 162;
-    for (int i = 0; i < MAX_PLAYERS; ++i) {
-        layout_.setup_player_type[i] = {setup_x + 42, py + i * (row_h + 8), setup_w - 84, row_h};
-    }
-    int opt_y = py + MAX_PLAYERS * (row_h + 8) + row_gap;
-    int opt_w = (setup_w - 84 - row_gap) / 2;
-    layout_.setup_tile_limit = {setup_x + 42, opt_y, opt_w, row_h};
-    layout_.setup_board_size = {setup_x + 42 + opt_w + row_gap, opt_y, opt_w, row_h};
-    layout_.setup_custom_board = {setup_x + 42, opt_y + row_h + row_gap, setup_w - 84, row_h};
-    int action_y = setup_y + setup_h - row_h - 34;
-    layout_.setup_start = {setup_x + setup_w / 2 - 220, action_y, 190, row_h};
-    layout_.setup_cancel = {setup_x + setup_w / 2 + 30, action_y, 190, row_h};
-}
+    int setup_y = std::max(78, (h - setup_h) / 2);
+    int row_h = std::max(50, std::min(62, h / 19));
+    int row_gap = 10;
+    int inner_setup_x = setup_x + 48;
+    int inner_setup_w = setup_w - 96;
 
+    layout_.setup_players = {inner_setup_x, setup_y + 88, inner_setup_w, row_h};
+    int py = setup_y + 154;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        layout_.setup_player_type[i] = {inner_setup_x, py + i * (row_h + row_gap), inner_setup_w, row_h};
+    }
+    int opt_y = py + MAX_PLAYERS * (row_h + row_gap) + 8;
+    int opt_w = (inner_setup_w - row_gap) / 2;
+    layout_.setup_tile_limit = {inner_setup_x, opt_y, opt_w, row_h};
+    layout_.setup_board_size = {inner_setup_x + opt_w + row_gap, opt_y, opt_w, row_h};
+    layout_.setup_custom_board = {inner_setup_x, opt_y + row_h + row_gap, inner_setup_w, row_h};
+    int action_y = setup_y + setup_h - row_h - 34;
+    layout_.setup_start = {setup_x + setup_w / 2 - 230, action_y, 200, row_h};
+    layout_.setup_cancel = {setup_x + setup_w / 2 + 30, action_y, 200, row_h};
+}
 void TileWordsApp::draw(cairo_t* cr, int w, int h) {
     fill_rect(cr, {0,0,w,h}, 1.0);
     switch (game_.mode) {
@@ -624,28 +650,30 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.top_settings, "SETTINGS");
     draw_button(cr, layout_.top_exit, "EXIT");
 
-    int score_x = 14;
-    int score_y = 12;
-    int score_area_w = std::max(280, layout_.top_new.x - 24);
-    int cols = game_.player_count <= 2 ? 2 : 2;
-    int row_h = 42;
-    int col_w = score_area_w / cols;
-    for (int i = 0; i < game_.player_count; ++i) {
-        int col = i % cols;
-        int row = i / cols;
-        Rect pr{score_x + col * col_w, score_y + row * row_h, col_w - 10, row_h - 8};
+    Rect tiles_box{14, 20, 172, 42};
+    fill_rect(cr, tiles_box, 1.0);
+    stroke_rect(cr, tiles_box, 0.0, 2.0);
+    std::ostringstream ts;
+    ts << "Tiles Left: " << pad3(static_cast<int>(game_.bag.size()));
+    centered_text(cr, tiles_box, ts.str(), 24, 0.0, false);
+
+    int pc = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
+    int score_row_y = 92;
+    int score_row_h = 52;
+    int slot_w = pc >= 4 ? std::min(190, (w - 170) / pc) : std::min(260, (w - 260) / pc);
+    slot_w = std::max(160, slot_w);
+    int total_score_w = slot_w * pc;
+    int score_x = (w - total_score_w) / 2;
+    for (int i = 0; i < pc; ++i) {
+        Rect pr{score_x + i * slot_w + 5, score_row_y, slot_w - 10, score_row_h};
         if (i == game_.current) {
-            fill_rect(cr, pr, 0.88);
+            fill_rect(cr, pr, 1.0);
             stroke_rect(cr, pr, 0.0, 3.0);
         }
         std::ostringstream ps;
-        ps << "Player " << (i + 1) << ": " << game_.scores[i];
-        if (game_.cpu[i]) ps << " CPU";
-        centered_text(cr, pr, ps.str(), 24, 0.0, true);
+        ps << (game_.cpu[i] ? "CPU " : "Player ") << (i + 1) << ": " << pad3(game_.scores[i]);
+        centered_text(cr, pr, ps.str(), 24, 0.0, false);
     }
-    std::ostringstream ts;
-    ts << "Tiles remaining: " << game_.bag.size();
-    text(cr, score_x + 2, score_y + (game_.player_count > 2 ? 92 : 50), ts.str(), 22, 0.0, true);
 
     for (int r = 0; r < BOARD_N; ++r) {
         for (int c = 0; c < BOARD_N; ++c) {
@@ -685,10 +713,9 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.btn_exchange, "EXCHANGE");
     draw_button(cr, layout_.btn_shuffle, "SHUFFLE");
     std::ostringstream vs;
-    vs << "VALUE " << preview_score();
+    vs << "VALUE: " << pad3(preview_score());
     draw_button(cr, layout_.btn_value, vs.str());
 }
-
 void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
     fill_rect(cr, {0,0,w,h}, 1.0);
     draw_button(cr, layout_.top_exit, "EXIT");
@@ -722,15 +749,15 @@ void TileWordsApp::draw_invalid(cairo_t* cr, int w, int h) {
 
 void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
-    int box_w = std::min(w * 86 / 100, 760);
-    int box_h = std::min(h * 70 / 100, 660);
-    Rect box{(w - box_w) / 2, (h - box_h) / 2, box_w, box_h};
+    int box_w = std::min(w * 78 / 100, 780);
+    int box_h = std::min(h * 74 / 100, 780);
+    Rect box{(w - box_w) / 2, std::max(78, (h - box_h) / 2), box_w, box_h};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    centered_text(cr, {box.x, box.y + 18, box.w, 60}, "NEW GAME SETUP", 34, 0.0, true);
+    centered_text(cr, {box.x, box.y + 18, box.w, 56}, "NEW GAME SETUP", 34, 0.0, true);
 
     std::ostringstream pc;
-    pc << "PLAYERS: " << game_.setup_player_count << "    Tap to change";
+    pc << "PLAYERS: " << game_.setup_player_count << "  -  TAP TO CHANGE";
     draw_button(cr, layout_.setup_players, pc.str());
 
     for (int i = 0; i < MAX_PLAYERS; ++i) {
@@ -740,7 +767,7 @@ void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
             fill_rect(cr, r, 0.94);
             stroke_rect(cr, r, 0.0, 2.0);
             std::ostringstream off; off << "PLAYER " << (i + 1) << ": OFF";
-            centered_text(cr, r, off.str(), 22, 0.55, true);
+            centered_text(cr, r, off.str(), 21, 0.55, true);
         } else {
             std::ostringstream ss;
             ss << "PLAYER " << (i + 1) << ": " << (game_.setup_cpu[i] ? "CPU" : "HUMAN");
@@ -749,7 +776,7 @@ void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
     }
 
     std::ostringstream tl;
-    tl << "TILE LIMIT: " << game_.tile_limit_option;
+    tl << "TILES: " << game_.tile_limit_option;
     draw_button(cr, layout_.setup_tile_limit, tl.str());
 
     std::ostringstream bs;
@@ -763,7 +790,6 @@ void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.setup_start, "START GAME");
     draw_button(cr, layout_.setup_cancel, "CANCEL");
 }
-
 void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
     centered_text(cr, {0, layout_.btn_submit.y - 36, w, 30}, "EXCHANGE: select rack tiles, then Submit", 24, 0.0, true);
