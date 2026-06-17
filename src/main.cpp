@@ -88,8 +88,10 @@ struct Game {
     bool game_over = false;
     bool ai_enabled = false;
     int tile_scale = 100;
-    int board_cell_tune = 0; // test-only: per-cell pixel adjustment, logged for final tuning
+    int board_cell_tune = 0; // per-cell board size adjustment saved per device
     int tile_limit_option = 100;
+    int last_turn_player = -1;
+    int last_turn_score = 0;
     bool procedural_board = false;
     bool setup_procedural_board = false;
     int starter_letters_option = 0;
@@ -153,6 +155,9 @@ private:
 
     static gboolean on_draw(GtkWidget* widget, GdkEventExpose* event, gpointer data);
     static gboolean on_button(GtkWidget* widget, GdkEventButton* event, gpointer data);
+    static gboolean on_key(GtkWidget* widget, GdkEventKey* event, gpointer data);
+    static gboolean on_focus_out(GtkWidget* widget, GdkEventFocus* event, gpointer data);
+    static gboolean on_visibility(GtkWidget* widget, GdkEventVisibility* event, gpointer data);
     static gboolean on_delete(GtkWidget* widget, GdkEvent* event, gpointer data);
     static gboolean on_raise_timer(gpointer data);
 
@@ -185,6 +190,8 @@ private:
     void place_starter_letters();
     bool can_place_starter_at(int row, int col) const;
     void quit();
+    void request_sleep();
+    void return_unsubmitted_tiles_to_rack();
     void new_game(bool reset_scores = true);
     void load_dictionary();
     void save_game();
@@ -438,10 +445,17 @@ bool TileWordsApp::init(int argc, char** argv) {
         GDK_EXPOSURE_MASK |
         GDK_BUTTON_PRESS_MASK |
         GDK_BUTTON_RELEASE_MASK |
-        GDK_POINTER_MOTION_MASK));
+        GDK_POINTER_MOTION_MASK |
+        GDK_KEY_PRESS_MASK |
+        GDK_FOCUS_CHANGE_MASK |
+        GDK_VISIBILITY_NOTIFY_MASK |
+        GDK_STRUCTURE_MASK));
 
     g_signal_connect(G_OBJECT(window_), "expose-event", G_CALLBACK(TileWordsApp::on_draw), this);
     g_signal_connect(G_OBJECT(window_), "button-press-event", G_CALLBACK(TileWordsApp::on_button), this);
+    g_signal_connect(G_OBJECT(window_), "key-press-event", G_CALLBACK(TileWordsApp::on_key), this);
+    g_signal_connect(G_OBJECT(window_), "focus-out-event", G_CALLBACK(TileWordsApp::on_focus_out), this);
+    g_signal_connect(G_OBJECT(window_), "visibility-notify-event", G_CALLBACK(TileWordsApp::on_visibility), this);
     g_signal_connect(G_OBJECT(window_), "delete-event", G_CALLBACK(TileWordsApp::on_delete), this);
 
     load_dictionary();
@@ -460,7 +474,7 @@ int TileWordsApp::run() {
         gdk_window_move_resize(gdk_window, 0, 0, gdk_screen_width(), gdk_screen_height());
         gdk_window_show(gdk_window);
         gdk_window_raise(gdk_window);
-        gdk_window_set_events(gdk_window, static_cast<GdkEventMask>(gdk_window_get_events(gdk_window) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK));
+        gdk_window_set_events(gdk_window, static_cast<GdkEventMask>(gdk_window_get_events(gdk_window) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_KEY_PRESS_MASK | GDK_FOCUS_CHANGE_MASK | GDK_VISIBILITY_NOTIFY_MASK | GDK_STRUCTURE_MASK));
         app_log("input: configured popup override-redirect window event mask");
     } else {
         app_log("input: missing gdk window after show");
@@ -530,6 +544,46 @@ gboolean TileWordsApp::on_button(GtkWidget*, GdkEventButton* event, gpointer dat
     return TRUE;
 }
 
+gboolean TileWordsApp::on_key(GtkWidget*, GdkEventKey* event, gpointer data) {
+    auto* app = static_cast<TileWordsApp*>(data);
+    if (!event) return FALSE;
+
+    std::ostringstream ss;
+    ss << "key: keyval=" << static_cast<unsigned long>(event->keyval);
+    app_log(ss.str());
+
+    // Common XF86 power/sleep keysyms. If the Kindle routes the hardware
+    // sleep button to the focused app, save safely and ask powerd to sleep.
+    const unsigned long keyval = static_cast<unsigned long>(event->keyval);
+    if (keyval == 0x1008FF2AUL || // XF86PowerOff
+        keyval == 0x1008FF2FUL || // XF86Sleep
+        keyval == 0x1008FF56UL) { // XF86Suspend
+        app->request_sleep();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+gboolean TileWordsApp::on_focus_out(GtkWidget*, GdkEventFocus*, gpointer data) {
+    auto* app = static_cast<TileWordsApp*>(data);
+    app_log("lifecycle: focus-out; safe save");
+    app->save_game();
+    return FALSE;
+}
+
+gboolean TileWordsApp::on_visibility(GtkWidget*, GdkEventVisibility* event, gpointer data) {
+    auto* app = static_cast<TileWordsApp*>(data);
+    if (event) {
+        std::ostringstream ss;
+        ss << "lifecycle: visibility-state=" << static_cast<int>(event->state) << "; safe save";
+        app_log(ss.str());
+    } else {
+        app_log("lifecycle: visibility event; safe save");
+    }
+    app->save_game();
+    return FALSE;
+}
+
 gboolean TileWordsApp::on_delete(GtkWidget*, GdkEvent*, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
     app->quit();
@@ -596,7 +650,9 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.btn_shuffle = {x, btn_y, bw, btn_h}; x += bw + gap;
     layout_.btn_value = {x, btn_y, value_w, btn_h};
 
-    layout_.confirm_button = {w / 4, h * 65 / 100, w / 2, std::max(76, h / 11)};
+    int confirm_w = std::max(220, std::min(340, w / 3));
+    int confirm_h = std::max(64, std::min(78, h / 18));
+    layout_.confirm_button = {(w - confirm_w) / 2, h * 78 / 100, confirm_w, confirm_h};
     layout_.popup_yes = {w / 2 - 190, h * 62 / 100, 170, 70};
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
 
@@ -659,7 +715,7 @@ void TileWordsApp::compute_layout(int w, int h) {
 
 void TileWordsApp::log_grid_metrics(const char* reason, int w, int h) {
     std::ostringstream ss;
-    ss << "grid-test: " << reason
+    ss << "grid: " << reason
        << " screen=" << w << "x" << h
        << " tune=" << game_.board_cell_tune
        << " cell_px=" << layout_.cell
@@ -757,20 +813,43 @@ void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
 void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
     fill_rect(cr, {0,0,w,h}, 1.0);
     draw_button(cr, layout_.top_exit, "EXIT");
-    Rect box{w / 12, h / 4, w * 5 / 6, h / 3};
-    fill_rect(cr, box, 1.0);
-    stroke_rect(cr, box, 0.0, 4.0);
+
+    double title_size = std::max(48.0, std::min(72.0, h / 16.0));
+    double turn_size = std::max(24.0, title_size / 2.0);
+    centered_text(cr, {0, h * 10 / 100, w, static_cast<int>(title_size + 20)}, "Pass the Kindle", title_size, 0.0, true);
+
+    std::ostringstream turn;
+    turn << (game_.cpu[game_.current] ? "CPU " : "Player ") << (game_.current + 1) << "'s turn";
+    centered_text(cr, {0, h * 19 / 100, w, static_cast<int>(turn_size + 18)}, turn.str(), turn_size, 0.0, true);
+
+    Rect scored_line{w / 12, h * 28 / 100, w * 5 / 6, std::max(42, h / 24)};
+    std::ostringstream scored;
+    if (game_.last_turn_player >= 0) {
+        scored << "Your opponent just scored " << pad3(game_.last_turn_score) << " points";
+    } else {
+        scored << "Your opponent just scored 000 points";
+    }
+    centered_text(cr, scored_line, scored.str(), std::max(24, h / 42), 0.0, false);
+
+    int pc = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
+    int score_row_y = h * 40 / 100;
+    int score_row_h = std::max(58, h / 18);
+    int slot_w = pc >= 4 ? std::min(220, (w - 110) / pc) : std::min(300, (w - 180) / pc);
+    slot_w = std::max(170, slot_w);
+    int total_score_w = slot_w * pc;
+    int score_x = (w - total_score_w) / 2;
+    for (int i = 0; i < pc; ++i) {
+        Rect pr{score_x + i * slot_w + 5, score_row_y, slot_w - 10, score_row_h};
+        if (i == game_.current) stroke_rect(cr, pr, 0.0, 3.0);
+        std::ostringstream ps;
+        ps << (game_.cpu[i] ? "CPU " : "Player ") << (i + 1) << ": " << pad3(game_.scores[i]);
+        centered_text(cr, pr, ps.str(), pc >= 4 ? std::max(23, h / 48) : std::max(27, h / 42), 0.0, false);
+    }
+
     if (game_.cpu[game_.current]) {
-        centered_text(cr, {box.x, box.y + 30, box.w, 70}, "CPU PLAYER", 44, 0.0, true);
-        std::ostringstream ss; ss << "PLAYER " << (game_.current + 1) << " IS CPU";
-        centered_text(cr, {box.x, box.y + 125, box.w, 60}, ss.str(), 34, 0.0, true);
-        centered_text(cr, {box.x, box.y + 188, box.w, 45}, "AI MOVE ENGINE NOT ENABLED YET", 22, 0.0, false);
+        centered_text(cr, {0, h * 55 / 100, w, 46}, "CPU move engine not enabled yet", std::max(22, h / 48), 0.0, false);
         draw_button(cr, layout_.confirm_button, "CONTINUE");
     } else {
-        centered_text(cr, {box.x, box.y + 30, box.w, 70}, "PASS KINDLE", 44, 0.0, true);
-        std::ostringstream ss; ss << "PLAYER " << (game_.current + 1) << "'S TURN";
-        centered_text(cr, {box.x, box.y + 130, box.w, 60}, ss.str(), 34, 0.0, true);
-        centered_text(cr, {box.x, box.y + 190, box.w, 45}, "RACK HIDDEN UNTIL CONFIRM", 22, 0.0, false);
         draw_button(cr, layout_.confirm_button, "CONFIRM");
     }
 }
@@ -838,19 +917,28 @@ void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
 
 void TileWordsApp::draw_blank_select(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
-    Rect box{w / 14, h / 5, w * 6 / 7, h * 3 / 5};
+    Rect box{w / 18, h / 7, w * 8 / 9, h * 5 / 7};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    centered_text(cr, {box.x, box.y + 15, box.w, 50}, "CHOOSE BLANK LETTER", 30, 0.0, true);
+    centered_text(cr, {box.x, box.y + 16, box.w, 58}, "CHOOSE BLANK LETTER", 36, 0.0, true);
+
     int cols = 7;
-    int size = std::min((box.w - 60) / cols, 68);
-    int start_x = box.x + (box.w - cols * size) / 2;
-    int start_y = box.y + 90;
+    int rows = 4;
+    int rack_like = layout_.rack[0].w > 0 ? layout_.rack[0].w + 4 : 104;
+    int size_by_width = (box.w - 84) / cols;
+    int size_by_height = (box.h - 118) / rows;
+    int size = std::min(std::min(size_by_width, size_by_height), std::max(92, rack_like));
+    size = std::max(78, size);
+    int gap = std::max(5, size / 14);
+    int total_w = cols * size;
+    int start_x = box.x + (box.w - total_w) / 2;
+    int start_y = box.y + 92;
+
     for (int i = 0; i < 26; ++i) {
         int rr = i / cols;
         int cc = i % cols;
-        Rect r{start_x + cc * size, start_y + rr * size, size - 5, size - 5};
-        draw_button(cr, r, std::string(1, static_cast<char>('A' + i)));
+        Rect r{start_x + cc * size, start_y + rr * size, size - gap, size - gap};
+        draw_tile_face(cr, r, static_cast<char>('A' + i), 0, false, game_.tile_scale);
     }
 }
 
@@ -888,8 +976,6 @@ void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
     gs << "GRID: " << layout_.cell << " px";
     draw_button(cr, layout_.btn_settings_grid_value, gs.str());
     draw_button(cr, layout_.btn_settings_plus, "GRID +");
-    centered_text(cr, {box.x + 20, layout_.btn_settings_plus.y + layout_.btn_settings_plus.h + 2, box.w - 40, 28}, "TEST SETTING: logs cell/board size to app.log", 18, 0.0, false);
-
     fill_rect(cr, layout_.btn_settings_placeholder1, 0.93);
     stroke_rect(cr, layout_.btn_settings_placeholder1, 0.0, 3.0);
     centered_text(cr, layout_.btn_settings_placeholder1, "FUTURE 1", std::max(18.0, layout_.btn_settings_placeholder1.h * 0.38), 0.45, true);
@@ -1002,15 +1088,23 @@ void TileWordsApp::touch_blank_select(int x, int y) {
     GtkAllocation alloc;
     gtk_widget_get_allocation(window_, &alloc);
     int w = alloc.width, h = alloc.height;
-    Rect box{w / 14, h / 5, w * 6 / 7, h * 3 / 5};
+    Rect box{w / 18, h / 7, w * 8 / 9, h * 5 / 7};
     int cols = 7;
-    int size = std::min((box.w - 60) / cols, 68);
-    int start_x = box.x + (box.w - cols * size) / 2;
-    int start_y = box.y + 90;
+    int rows = 4;
+    int rack_like = layout_.rack[0].w > 0 ? layout_.rack[0].w + 4 : 104;
+    int size_by_width = (box.w - 84) / cols;
+    int size_by_height = (box.h - 118) / rows;
+    int size = std::min(std::min(size_by_width, size_by_height), std::max(92, rack_like));
+    size = std::max(78, size);
+    int gap = std::max(5, size / 14);
+    int total_w = cols * size;
+    int start_x = box.x + (box.w - total_w) / 2;
+    int start_y = box.y + 92;
+
     for (int i = 0; i < 26; ++i) {
         int rr = i / cols;
         int cc = i % cols;
-        Rect r{start_x + cc * size, start_y + rr * size, size - 5, size - 5};
+        Rect r{start_x + cc * size, start_y + rr * size, size - gap, size - gap};
         if (in_rect(r, x, y)) {
             if (game_.blank_row >= 0 && game_.blank_col >= 0) {
                 game_.board[game_.blank_row][game_.blank_col].ch = static_cast<char>('A' + i);
@@ -1225,6 +1319,28 @@ void TileWordsApp::place_starter_letters() {
     app_log("newgame: placed " + std::to_string(placed) + " starter letters");
 }
 
+void TileWordsApp::return_unsubmitted_tiles_to_rack() {
+    auto placed = placed_cells();
+    if (placed.empty()) return;
+    app_log("autosave: returning " + std::to_string(placed.size()) + " unsubmitted tile(s) to rack before save");
+    // Return by repeatedly scanning because return_temp_tile mutates board state.
+    for (auto [r, c] : placed) return_temp_tile(r, c);
+    game_.selected_rack = -1;
+    game_.blank_row = -1;
+    game_.blank_col = -1;
+    if (game_.mode == Mode::BlankSelect) game_.mode = Mode::Normal;
+}
+
+void TileWordsApp::request_sleep() {
+    app_log("sleep: request received; safe save before sleep");
+    save_game();
+    // Let Kindle powerd handle the actual sleep request. This is intentionally
+    // best-effort; if a firmware build does not expose lipc here, the save
+    // has still been completed.
+    int rc = std::system("lipc-set-prop com.lab126.powerd powerButton 1 >/dev/null 2>&1 &");
+    app_log("sleep: powerd command rc=" + std::to_string(rc));
+}
+
 void TileWordsApp::quit() {
     app_log("quit: save and gtk_main_quit");
     save_game();
@@ -1259,6 +1375,8 @@ void TileWordsApp::new_game(bool reset_scores) {
     for (int i = game_.player_count; i < MAX_PLAYERS; ++i) game_.cpu[i] = false;
     game_.setup_cpu = game_.cpu;
     game_.tile_limit_option = keep_tile_limit;
+    game_.last_turn_player = -1;
+    game_.last_turn_score = 0;
     game_.procedural_board = keep_procedural_board;
     game_.setup_procedural_board = keep_procedural_board;
     game_.starter_letters_option = keep_starter_letters;
@@ -1423,6 +1541,7 @@ static int json_int_value(const std::string& src, const std::string& key, int de
 }
 
 void TileWordsApp::save_game() {
+    return_unsubmitted_tiles_to_rack();
     std::ofstream out(save_path_);
     if (!out) return;
     out << "{\n";
@@ -1437,6 +1556,8 @@ void TileWordsApp::save_game() {
     out << "  \"tile_scale\": " << game_.tile_scale << ",\n";
     out << "  \"board_cell_tune\": " << game_.board_cell_tune << ",\n";
     out << "  \"tile_limit_option\": " << game_.tile_limit_option << ",\n";
+    out << "  \"last_turn_player\": " << game_.last_turn_player << ",\n";
+    out << "  \"last_turn_score\": " << game_.last_turn_score << ",\n";
     out << "  \"procedural_board\": " << (game_.procedural_board ? 1 : 0) << ",\n";
     out << "  \"starter_letters_option\": " << game_.starter_letters_option << ",\n";
     out << "  \"premiumboard\": [\n";
@@ -1493,6 +1614,9 @@ bool TileWordsApp::load_game() {
     loaded.tile_scale = std::max(80, std::min(140, json_int_value(src, "tile_scale", 100)));
     loaded.board_cell_tune = std::max(-12, std::min(12, json_int_value(src, "board_cell_tune", 0)));
     loaded.tile_limit_option = json_int_value(src, "tile_limit_option", 100);
+    loaded.last_turn_player = json_int_value(src, "last_turn_player", -1);
+    loaded.last_turn_score = std::max(0, json_int_value(src, "last_turn_score", 0));
+    if (loaded.last_turn_player >= loaded.player_count) loaded.last_turn_player = -1;
     loaded.procedural_board = json_int_value(src, "procedural_board", 0) != 0;
     loaded.setup_procedural_board = loaded.procedural_board;
     loaded.starter_letters_option = json_int_value(src, "starter_letters_option", 0);
@@ -1573,6 +1697,8 @@ void TileWordsApp::shuffle_rack() {
 
 void TileWordsApp::pass_turn() {
     for (auto [r, c] : placed_cells()) return_temp_tile(r, c);
+    game_.last_turn_player = game_.current;
+    game_.last_turn_score = 0;
     game_.selected_rack = -1;
     game_.pass_count++;
     if (game_.pass_count >= game_.player_count * 3) {
@@ -1598,6 +1724,8 @@ void TileWordsApp::exchange_tiles() {
         }
     }
     game_.exchange_selected.fill(false);
+    game_.last_turn_player = game_.current;
+    game_.last_turn_score = 0;
     game_.selected_rack = -1;
     game_.pass_count = 0;
     advance_to_next_player();
@@ -1817,6 +1945,8 @@ void TileWordsApp::lock_placed_and_score(int score) {
         game_.board[r][c].rack_index = -1;
     }
     game_.scores[game_.current] += score;
+    game_.last_turn_player = game_.current;
+    game_.last_turn_score = score;
     refill_rack(game_.current);
     game_.selected_rack = -1;
     game_.pass_count = 0;
