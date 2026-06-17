@@ -1108,11 +1108,11 @@ void TileWordsApp::touch_normal(int x, int y) {
 
 void TileWordsApp::touch_handoff(int x, int y) {
     if (in_rect(layout_.confirm_button, x, y)) {
+        game_.mode = Mode::Normal;
         if (game_.cpu[game_.current]) {
-            game_.mode = Mode::Normal;
+            app_log("cpu: defensive handoff confirm for cpu player " + std::to_string(game_.current + 1));
             run_cpu_turn();
         } else {
-            game_.mode = Mode::Normal;
             save_game();
         }
         queue_draw();
@@ -1827,8 +1827,16 @@ void TileWordsApp::advance_to_next_player() {
 }
 
 void TileWordsApp::enter_handoff() {
-    if (!game_.game_over) game_.mode = Mode::Handoff;
+    if (game_.game_over) return;
+    if (game_.cpu[game_.current]) {
+        game_.mode = Mode::Normal;
+        app_log("cpu: auto-run player " + std::to_string(game_.current + 1) + " without handoff");
+        run_cpu_turn();
+        return;
+    }
+    game_.mode = Mode::Handoff;
 }
+
 
 void TileWordsApp::reject(const std::string& msg) {
     game_.invalid_message = msg;
@@ -2096,63 +2104,154 @@ CpuMove TileWordsApp::find_cpu_move(int time_limit_ms) const {
     const auto start_time = std::chrono::steady_clock::now();
     int checked = 0;
     int legal = 0;
+    int candidate_words = 0;
 
     auto timed_out = [&]() {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time).count();
         return elapsed >= time_limit_ms;
     };
 
-    std::vector<std::pair<int,int>> anchors;
-    if (first_move) {
-        anchors.push_back({7, 7});
-    } else {
-        bool seen[BOARD_N][BOARD_N] = {};
-        const int d4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
-        for (int r = 0; r < BOARD_N; ++r) {
-            for (int c = 0; c < BOARD_N; ++c) {
-                if (game_.board[r][c].locked) {
-                    if (!seen[r][c]) { anchors.push_back({r,c}); seen[r][c] = true; }
-                    for (auto& d : d4) {
-                        int rr = r + d[0], cc = c + d[1];
-                        if (rr >= 0 && rr < BOARD_N && cc >= 0 && cc < BOARD_N && !game_.board[rr][cc].ch && !seen[rr][cc]) {
-                            anchors.push_back({rr, cc});
-                            seen[rr][cc] = true;
-                        }
-                    }
-                }
-            }
+    auto rack_string = [&]() {
+        std::string r;
+        for (const Tile& t : game_.racks[game_.current]) if (t.ch) r.push_back(t.ch);
+        return r;
+    };
+
+    std::array<int, 26> rack_counts{};
+    int blanks = 0;
+    for (const Tile& t : game_.racks[game_.current]) {
+        char ch = std::toupper(static_cast<unsigned char>(t.ch));
+        if (!ch) continue;
+        if (ch == '?' || t.blank) { ++blanks; continue; }
+        if (ch >= 'A' && ch <= 'Z') rack_counts[ch - 'A']++;
+    }
+
+    std::vector<std::pair<int,int>> locked_tiles;
+    for (int r = 0; r < BOARD_N; ++r) {
+        for (int c = 0; c < BOARD_N; ++c) {
+            if (game_.board[r][c].locked && game_.board[r][c].ch) locked_tiles.push_back({r, c});
         }
     }
 
-    for (const std::string& word : dictionary_words_) {
-        const int len = static_cast<int>(word.size());
-        if (len < 2 || len > BOARD_N) continue;
-        if ((checked & 1023) == 0 && timed_out()) break;
+    auto word_can_be_made_from_rack = [&](const std::string& word) {
+        std::array<int, 26> need{};
+        for (char raw : word) {
+            char ch = std::toupper(static_cast<unsigned char>(raw));
+            if (ch < 'A' || ch > 'Z') return false;
+            need[ch - 'A']++;
+        }
+        int missing = 0;
+        for (int i = 0; i < 26; ++i) if (need[i] > rack_counts[i]) missing += need[i] - rack_counts[i];
+        return missing <= blanks;
+    };
 
-        for (auto [ar, ac] : anchors) {
+    auto word_can_be_made_with_board = [&](const std::string& word) {
+        if (first_move) return word_can_be_made_from_rack(word);
+        std::array<int, 26> available = rack_counts;
+        for (auto [r, c] : locked_tiles) {
+            char board_ch = std::toupper(static_cast<unsigned char>(game_.board[r][c].ch));
+            if (board_ch >= 'A' && board_ch <= 'Z') available[board_ch - 'A']++;
+        }
+        std::array<int, 26> need{};
+        for (char raw : word) {
+            char ch = std::toupper(static_cast<unsigned char>(raw));
+            if (ch < 'A' || ch > 'Z') return false;
+            need[ch - 'A']++;
+        }
+        int missing = 0;
+        for (int i = 0; i < 26; ++i) if (need[i] > available[i]) missing += need[i] - available[i];
+        return missing <= blanks;
+    };
+
+    auto consider = [&](const std::string& word, int sr, int sc, int dr, int dc) {
+        CpuMove move;
+        ++checked;
+        if (evaluate_cpu_placement(word, sr, sc, dr, dc, move)) {
+            ++legal;
+            if (!best.ok || move.score > best.score || (move.score == best.score && move.word.size() > best.word.size())) {
+                best = move;
+                best.ok = true;
+            }
+        }
+    };
+
+    app_log("cpu: rack=" + rack_string() + " locked=" + std::to_string(locked_tiles.size()) + " words=" + std::to_string(dictionary_words_.size()));
+
+    if (first_move) {
+        // First move is cheap: only words buildable from the rack can matter. Try every
+        // center-crossing placement, but scan the entire dictionary instead of timing
+        // out on alphabetically early words.
+        for (const std::string& word : dictionary_words_) {
+            const int len = static_cast<int>(word.size());
+            if (len < 2 || len > BOARD_N || !word_can_be_made_from_rack(word)) continue;
+            ++candidate_words;
             for (int dir = 0; dir < 2; ++dir) {
                 int dr = dir == 0 ? 0 : 1;
                 int dc = dir == 0 ? 1 : 0;
                 for (int wi = 0; wi < len; ++wi) {
-                    if (!first_move && game_.board[ar][ac].ch && std::toupper(static_cast<unsigned char>(game_.board[ar][ac].ch)) != word[wi]) continue;
-                    int sr = ar - dr * wi;
-                    int sc = ac - dc * wi;
-                    CpuMove move;
-                    ++checked;
-                    if (evaluate_cpu_placement(word, sr, sc, dr, dc, move)) {
-                        ++legal;
-                        if (!best.ok || move.score > best.score || (move.score == best.score && move.word.size() > best.word.size())) {
-                            best = move;
-                            best.ok = true;
+                    int sr = 7 - dr * wi;
+                    int sc = 7 - dc * wi;
+                    consider(word, sr, sc, dr, dc);
+                }
+            }
+        }
+    } else {
+        // Real move search: first try plays that pass through existing locked tiles.
+        // This avoids the old sorted-dictionary timeout bias that could spend the
+        // whole turn checking A-words and report zero legal moves.
+        for (const std::string& word : dictionary_words_) {
+            const int len = static_cast<int>(word.size());
+            if (len < 2 || len > BOARD_N) continue;
+            if (!word_can_be_made_with_board(word)) continue;
+            ++candidate_words;
+            for (auto [ar, ac] : locked_tiles) {
+                char board_ch = std::toupper(static_cast<unsigned char>(game_.board[ar][ac].ch));
+                for (int wi = 0; wi < len; ++wi) {
+                    if (word[wi] != board_ch) continue;
+                    consider(word, ar, ac - wi, 0, 1);
+                    consider(word, ar - wi, ac, 1, 0);
+                }
+            }
+            if (best.ok && (checked & 2047) == 0 && timed_out()) break;
+        }
+
+        // Fallback: if no through-letter move was found, try empty anchor squares next
+        // to locked tiles. This catches hook/cross plays that do not reuse a board
+        // letter in the main word but form valid perpendicular words.
+        if (!best.ok && !timed_out()) {
+            bool seen[BOARD_N][BOARD_N] = {};
+            std::vector<std::pair<int,int>> empty_anchors;
+            const int d4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+            for (auto [r, c] : locked_tiles) {
+                for (auto& d : d4) {
+                    int rr = r + d[0], cc = c + d[1];
+                    if (rr >= 0 && rr < BOARD_N && cc >= 0 && cc < BOARD_N && !game_.board[rr][cc].ch && !seen[rr][cc]) {
+                        empty_anchors.push_back({rr, cc});
+                        seen[rr][cc] = true;
+                    }
+                }
+            }
+            for (const std::string& word : dictionary_words_) {
+                const int len = static_cast<int>(word.size());
+                if (len < 2 || len > BOARD_N || !word_can_be_made_from_rack(word)) continue;
+                for (auto [ar, ac] : empty_anchors) {
+                    for (int dir = 0; dir < 2; ++dir) {
+                        int dr = dir == 0 ? 0 : 1;
+                        int dc = dir == 0 ? 1 : 0;
+                        for (int wi = 0; wi < len; ++wi) {
+                            int sr = ar - dr * wi;
+                            int sc = ac - dc * wi;
+                            consider(word, sr, sc, dr, dc);
                         }
                     }
                 }
+                if ((checked & 2047) == 0 && timed_out()) break;
             }
         }
     }
 
     std::ostringstream ss;
-    ss << "cpu: search checked=" << checked << " legal=" << legal;
+    ss << "cpu: search rack=" << rack_string() << " candidates=" << candidate_words << " checked=" << checked << " legal=" << legal;
     if (best.ok) ss << " best=" << best.word << " score=" << best.score << " tiles=" << best.placements.size();
     else ss << " no-move";
     app_log(ss.str());
