@@ -69,6 +69,7 @@ struct MoveResult {
     bool ok = false;
     int score = 0;
     std::string message;
+    std::string word;
 };
 
 struct Game {
@@ -92,6 +93,7 @@ struct Game {
     int tile_limit_option = 100;
     int last_turn_player = -1;
     int last_turn_score = 0;
+    std::string last_turn_word;
     bool procedural_board = false;
     bool setup_procedural_board = false;
     int starter_letters_option = 0;
@@ -208,7 +210,7 @@ private:
     void reject(const std::string& msg);
     void submit_move();
     MoveResult validate_and_score();
-    void lock_placed_and_score(int score);
+    void lock_placed_and_score(int score, const std::string& word);
     void return_temp_tile(int row, int col);
     int locked_count() const;
     std::vector<std::pair<int,int>> placed_cells() const;
@@ -814,28 +816,39 @@ void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
     fill_rect(cr, {0,0,w,h}, 1.0);
     draw_button(cr, layout_.top_exit, "EXIT");
 
-    double title_size = std::max(48.0, std::min(72.0, h / 16.0));
-    double turn_size = std::max(24.0, title_size / 2.0);
-    centered_text(cr, {0, h * 10 / 100, w, static_cast<int>(title_size + 20)}, "Pass the Kindle", title_size, 0.0, true);
+    const double title_size = std::max(74.0, std::min(128.0, h / 11.5));
+    const double turn_size = std::max(36.0, title_size * 0.50);
+    const double info_size = std::max(24.0, std::min(38.0, h / 38.0));
+    const double score_size = std::max(24.0, std::min(36.0, h / 42.0));
+
+    Rect title_rect{0, h * 12 / 100, w, static_cast<int>(title_size + 24)};
+    centered_text(cr, title_rect, "Pass the Kindle", title_size, 0.0, false);
+
+    int underline_w = std::min(w * 78 / 100, static_cast<int>(title_size * 8.6));
+    int underline_x = (w - underline_w) / 2;
+    int underline_y = title_rect.y + title_rect.h - 8;
+    set_gray(cr, 0.0);
+    cairo_set_line_width(cr, std::max(2.0, title_size / 34.0));
+    cairo_move_to(cr, underline_x, underline_y);
+    cairo_line_to(cr, underline_x + underline_w, underline_y);
+    cairo_stroke(cr);
 
     std::ostringstream turn;
-    turn << (game_.cpu[game_.current] ? "CPU " : "Player ") << (game_.current + 1) << "'s turn";
-    centered_text(cr, {0, h * 19 / 100, w, static_cast<int>(turn_size + 18)}, turn.str(), turn_size, 0.0, true);
+    turn << (game_.cpu[game_.current] ? "CPU " : "Player ") << (game_.current + 1) << "'s Turn";
+    centered_text(cr, {0, h * 28 / 100, w, static_cast<int>(turn_size + 18)}, turn.str(), turn_size, 0.0, false);
 
-    Rect scored_line{w / 12, h * 28 / 100, w * 5 / 6, std::max(42, h / 24)};
     std::ostringstream scored;
-    if (game_.last_turn_player >= 0) {
-        scored << "Your opponent just scored " << pad3(game_.last_turn_score) << " points";
-    } else {
-        scored << "Your opponent just scored 000 points";
-    }
-    centered_text(cr, scored_line, scored.str(), std::max(24, h / 42), 0.0, false);
+    scored << "Your opponent just scored " << pad3(game_.last_turn_score) << " points";
+    centered_text(cr, {0, h * 42 / 100, w, static_cast<int>(info_size + 18)}, scored.str(), info_size, 0.0, false);
+
+    std::string word = game_.last_turn_word.empty() ? "--" : game_.last_turn_word;
+    centered_text(cr, {0, h * 47 / 100, w, static_cast<int>(info_size + 18)}, "with the word: " + word, info_size, 0.0, false);
 
     int pc = std::max(2, std::min(MAX_PLAYERS, game_.player_count));
-    int score_row_y = h * 40 / 100;
-    int score_row_h = std::max(58, h / 18);
-    int slot_w = pc >= 4 ? std::min(220, (w - 110) / pc) : std::min(300, (w - 180) / pc);
-    slot_w = std::max(170, slot_w);
+    int score_row_y = h * 58 / 100;
+    int score_row_h = std::max(50, static_cast<int>(score_size + 26));
+    int slot_w = pc >= 4 ? std::min(210, (w - 100) / pc) : std::min(300, (w - 180) / pc);
+    slot_w = std::max(pc >= 4 ? 150 : 190, slot_w);
     int total_score_w = slot_w * pc;
     int score_x = (w - total_score_w) / 2;
     for (int i = 0; i < pc; ++i) {
@@ -843,15 +856,10 @@ void TileWordsApp::draw_handoff(cairo_t* cr, int w, int h) {
         if (i == game_.current) stroke_rect(cr, pr, 0.0, 3.0);
         std::ostringstream ps;
         ps << (game_.cpu[i] ? "CPU " : "Player ") << (i + 1) << ": " << pad3(game_.scores[i]);
-        centered_text(cr, pr, ps.str(), pc >= 4 ? std::max(23, h / 48) : std::max(27, h / 42), 0.0, false);
+        centered_text(cr, pr, ps.str(), pc >= 4 ? std::max(22.0, score_size * 0.84) : score_size, 0.0, false);
     }
 
-    if (game_.cpu[game_.current]) {
-        centered_text(cr, {0, h * 55 / 100, w, 46}, "CPU move engine not enabled yet", std::max(22, h / 48), 0.0, false);
-        draw_button(cr, layout_.confirm_button, "CONTINUE");
-    } else {
-        draw_button(cr, layout_.confirm_button, "CONFIRM");
-    }
+    draw_button(cr, layout_.confirm_button, game_.cpu[game_.current] ? "CONTINUE" : "CONFIRM");
 }
 
 void TileWordsApp::draw_invalid(cairo_t* cr, int w, int h) {
@@ -1377,6 +1385,7 @@ void TileWordsApp::new_game(bool reset_scores) {
     game_.tile_limit_option = keep_tile_limit;
     game_.last_turn_player = -1;
     game_.last_turn_score = 0;
+    game_.last_turn_word.clear();
     game_.procedural_board = keep_procedural_board;
     game_.setup_procedural_board = keep_procedural_board;
     game_.starter_letters_option = keep_starter_letters;
@@ -1558,6 +1567,7 @@ void TileWordsApp::save_game() {
     out << "  \"tile_limit_option\": " << game_.tile_limit_option << ",\n";
     out << "  \"last_turn_player\": " << game_.last_turn_player << ",\n";
     out << "  \"last_turn_score\": " << game_.last_turn_score << ",\n";
+    out << "  \"last_turn_word\": \"" << upper_word(game_.last_turn_word) << "\",\n";
     out << "  \"procedural_board\": " << (game_.procedural_board ? 1 : 0) << ",\n";
     out << "  \"starter_letters_option\": " << game_.starter_letters_option << ",\n";
     out << "  \"premiumboard\": [\n";
@@ -1616,6 +1626,7 @@ bool TileWordsApp::load_game() {
     loaded.tile_limit_option = json_int_value(src, "tile_limit_option", 100);
     loaded.last_turn_player = json_int_value(src, "last_turn_player", -1);
     loaded.last_turn_score = std::max(0, json_int_value(src, "last_turn_score", 0));
+    loaded.last_turn_word = upper_word(json_string_value(src, "last_turn_word"));
     if (loaded.last_turn_player >= loaded.player_count) loaded.last_turn_player = -1;
     loaded.procedural_board = json_int_value(src, "procedural_board", 0) != 0;
     loaded.setup_procedural_board = loaded.procedural_board;
@@ -1699,6 +1710,7 @@ void TileWordsApp::pass_turn() {
     for (auto [r, c] : placed_cells()) return_temp_tile(r, c);
     game_.last_turn_player = game_.current;
     game_.last_turn_score = 0;
+    game_.last_turn_word.clear();
     game_.selected_rack = -1;
     game_.pass_count++;
     if (game_.pass_count >= game_.player_count * 3) {
@@ -1726,6 +1738,7 @@ void TileWordsApp::exchange_tiles() {
     game_.exchange_selected.fill(false);
     game_.last_turn_player = game_.current;
     game_.last_turn_score = 0;
+    game_.last_turn_word.clear();
     game_.selected_rack = -1;
     game_.pass_count = 0;
     advance_to_next_player();
@@ -1755,7 +1768,7 @@ void TileWordsApp::reject(const std::string& msg) {
 void TileWordsApp::submit_move() {
     MoveResult res = validate_and_score();
     if (!res.ok) { reject(res.message); return; }
-    lock_placed_and_score(res.score);
+    lock_placed_and_score(res.score, res.word);
     save_game();
 }
 
@@ -1928,17 +1941,24 @@ MoveResult TileWordsApp::validate_and_score() {
     if (dictionary_.empty()) return {false, 0, "Dictionary missing or empty."};
 
     int total = 0;
+    std::string best_word;
+    int best_score = -1;
     for (const auto& cells : words) {
         std::string w;
         for (auto [r,c] : cells) w.push_back(game_.board[r][c].ch);
         if (!is_dictionary_word(w)) return {false, 0, "Word not in dictionary: " + w};
-        total += score_word(cells);
+        int word_score = score_word(cells);
+        total += word_score;
+        if (word_score > best_score || (word_score == best_score && w.size() > best_word.size())) {
+            best_score = word_score;
+            best_word = w;
+        }
     }
     if (placed.size() == RACK_N) total += BINGO_BONUS;
-    return {true, total, ""};
+    return {true, total, "", best_word};
 }
 
-void TileWordsApp::lock_placed_and_score(int score) {
+void TileWordsApp::lock_placed_and_score(int score, const std::string& word) {
     auto placed = placed_cells();
     for (auto [r,c] : placed) {
         game_.board[r][c].locked = true;
@@ -1947,6 +1967,7 @@ void TileWordsApp::lock_placed_and_score(int score) {
     game_.scores[game_.current] += score;
     game_.last_turn_player = game_.current;
     game_.last_turn_score = score;
+    game_.last_turn_word = upper_word(word);
     refill_rack(game_.current);
     game_.selected_rack = -1;
     game_.pass_count = 0;
