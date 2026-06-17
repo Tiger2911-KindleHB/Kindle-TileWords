@@ -916,8 +916,11 @@ void TileWordsApp::draw_new_setup(cairo_t* cr, int w, int h) {
     draw_button(cr, layout_.setup_cancel, "CANCEL");
 }
 void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
+    (void)w;
+    (void)h;
     draw_normal(cr, w, h);
-    centered_text(cr, {0, layout_.btn_submit.y - 36, w, 30}, "EXCHANGE: select rack tiles, then Submit", 24, 0.0, true);
+    // Keep exchange mode visually clean: selected rack tiles get an outline, with no
+    // instruction text overlaying the rack or bottom controls.
     for (int i = 0; i < RACK_N; ++i) {
         if (game_.exchange_selected[i]) stroke_rect(cr, layout_.rack[i], 0.0, 7.0);
     }
@@ -925,27 +928,38 @@ void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
 
 void TileWordsApp::draw_blank_select(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
-    Rect box{w / 18, h / 7, w * 8 / 9, h * 5 / 7};
+
+    const int cols = 7;
+    const int rows = 4;
+    int tile_size = layout_.rack[0].w > 0 ? layout_.rack[0].w : std::max(82, w / 11);
+    tile_size = std::max(72, std::min(tile_size, (w - 140) / cols));
+    int gap = std::max(8, tile_size / 12);
+    int grid_w = cols * tile_size + (cols - 1) * gap;
+    int grid_h = rows * tile_size + (rows - 1) * gap;
+
+    int pad_x = std::max(34, w / 28);
+    int title_h = std::max(58, h / 22);
+    int top_pad = 26;
+    int bottom_pad = 34;
+    int box_w = std::min(w - 80, grid_w + pad_x * 2);
+    int box_h = top_pad + title_h + 22 + grid_h + bottom_pad;
+    int box_x = (w - box_w) / 2;
+    int preferred_y = std::max(layout_.board.y + layout_.cell, h / 7);
+    int max_y = std::max(16, layout_.btn_submit.y - box_h - 18);
+    int box_y = std::min(preferred_y, max_y);
+    Rect box{box_x, box_y, box_w, box_h};
+
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
-    centered_text(cr, {box.x, box.y + 16, box.w, 58}, "CHOOSE BLANK LETTER", 36, 0.0, true);
+    centered_text(cr, {box.x, box.y + top_pad, box.w, title_h}, "CHOOSE BLANK LETTER", 36, 0.0, true);
 
-    int cols = 7;
-    int rows = 4;
-    int rack_like = layout_.rack[0].w > 0 ? layout_.rack[0].w + 4 : 104;
-    int size_by_width = (box.w - 84) / cols;
-    int size_by_height = (box.h - 118) / rows;
-    int size = std::min(std::min(size_by_width, size_by_height), std::max(92, rack_like));
-    size = std::max(78, size);
-    int gap = std::max(5, size / 14);
-    int total_w = cols * size;
-    int start_x = box.x + (box.w - total_w) / 2;
-    int start_y = box.y + 92;
+    int start_x = box.x + (box.w - grid_w) / 2;
+    int start_y = box.y + top_pad + title_h + 22;
 
     for (int i = 0; i < 26; ++i) {
         int rr = i / cols;
         int cc = i % cols;
-        Rect r{start_x + cc * size, start_y + rr * size, size - gap, size - gap};
+        Rect r{start_x + cc * (tile_size + gap), start_y + rr * (tile_size + gap), tile_size, tile_size};
         draw_tile_face(cr, r, static_cast<char>('A' + i), 0, false, game_.tile_scale);
     }
 }
@@ -1096,23 +1110,33 @@ void TileWordsApp::touch_blank_select(int x, int y) {
     GtkAllocation alloc;
     gtk_widget_get_allocation(window_, &alloc);
     int w = alloc.width, h = alloc.height;
-    Rect box{w / 18, h / 7, w * 8 / 9, h * 5 / 7};
-    int cols = 7;
-    int rows = 4;
-    int rack_like = layout_.rack[0].w > 0 ? layout_.rack[0].w + 4 : 104;
-    int size_by_width = (box.w - 84) / cols;
-    int size_by_height = (box.h - 118) / rows;
-    int size = std::min(std::min(size_by_width, size_by_height), std::max(92, rack_like));
-    size = std::max(78, size);
-    int gap = std::max(5, size / 14);
-    int total_w = cols * size;
-    int start_x = box.x + (box.w - total_w) / 2;
-    int start_y = box.y + 92;
+
+    const int cols = 7;
+    const int rows = 4;
+    int tile_size = layout_.rack[0].w > 0 ? layout_.rack[0].w : std::max(82, w / 11);
+    tile_size = std::max(72, std::min(tile_size, (w - 140) / cols));
+    int gap = std::max(8, tile_size / 12);
+    int grid_w = cols * tile_size + (cols - 1) * gap;
+    int grid_h = rows * tile_size + (rows - 1) * gap;
+
+    int pad_x = std::max(34, w / 28);
+    int title_h = std::max(58, h / 22);
+    int top_pad = 26;
+    int bottom_pad = 34;
+    int box_w = std::min(w - 80, grid_w + pad_x * 2);
+    int box_h = top_pad + title_h + 22 + grid_h + bottom_pad;
+    int box_x = (w - box_w) / 2;
+    int preferred_y = std::max(layout_.board.y + layout_.cell, h / 7);
+    int max_y = std::max(16, layout_.btn_submit.y - box_h - 18);
+    int box_y = std::min(preferred_y, max_y);
+
+    int start_x = box_x + (box_w - grid_w) / 2;
+    int start_y = box_y + top_pad + title_h + 22;
 
     for (int i = 0; i < 26; ++i) {
         int rr = i / cols;
         int cc = i % cols;
-        Rect r{start_x + cc * size, start_y + rr * size, size - gap, size - gap};
+        Rect r{start_x + cc * (tile_size + gap), start_y + rr * (tile_size + gap), tile_size, tile_size};
         if (in_rect(r, x, y)) {
             if (game_.blank_row >= 0 && game_.blank_col >= 0) {
                 game_.board[game_.blank_row][game_.blank_col].ch = static_cast<char>('A' + i);
