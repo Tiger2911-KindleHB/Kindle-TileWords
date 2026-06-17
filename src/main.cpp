@@ -168,6 +168,7 @@ private:
     std::string dict_path_;
     std::vector<Rect> dirty_rects_;
     bool full_redraw_pending_ = true;
+    bool loading_ = true;
     int last_logged_w_ = -1;
     int last_logged_h_ = -1;
     int last_logged_cell_ = -1;
@@ -184,6 +185,8 @@ private:
     void compute_layout(int w, int h);
     void log_grid_metrics(const char* reason, int w, int h);
     void draw(cairo_t* cr, int w, int h);
+    void draw_loading(cairo_t* cr, int w, int h);
+    void show_loading_splash();
     void draw_normal(cairo_t* cr, int w, int h);
     void draw_handoff(cairo_t* cr, int w, int h);
     void draw_invalid(cairo_t* cr, int w, int h);
@@ -492,10 +495,56 @@ bool TileWordsApp::init(int argc, char** argv) {
     g_signal_connect(G_OBJECT(window_), "visibility-notify-event", G_CALLBACK(TileWordsApp::on_visibility), this);
     g_signal_connect(G_OBJECT(window_), "delete-event", G_CALLBACK(TileWordsApp::on_delete), this);
 
+    show_loading_splash();
+    app_log("splash: begin dictionary and save load");
     load_dictionary();
     if (!load_game()) new_game(true);
+    loading_ = false;
+    full_redraw_pending_ = true;
+    if (window_) gtk_widget_queue_draw(window_);
+    app_log("splash: finished dictionary and save load");
 
     return true;
+}
+
+
+void TileWordsApp::show_loading_splash() {
+    if (!window_) return;
+    loading_ = true;
+    full_redraw_pending_ = true;
+
+    app_log("splash: show loading screen");
+    gtk_widget_show_all(window_);
+    gtk_window_present(GTK_WINDOW(window_));
+
+    GdkWindow* gdk_window = gtk_widget_get_window(window_);
+    if (gdk_window) {
+        gdk_window_set_override_redirect(gdk_window, TRUE);
+        gdk_window_move_resize(gdk_window, 0, 0, gdk_screen_width(), gdk_screen_height());
+        gdk_window_show(gdk_window);
+        gdk_window_raise(gdk_window);
+        gdk_window_set_events(gdk_window, static_cast<GdkEventMask>(gdk_window_get_events(gdk_window) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_KEY_PRESS_MASK | GDK_FOCUS_CHANGE_MASK | GDK_VISIBILITY_NOTIFY_MASK | GDK_STRUCTURE_MASK));
+    }
+
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(window_, &alloc);
+    if (alloc.width <= 0 || alloc.height <= 0) {
+        alloc.width = gdk_screen_width();
+        alloc.height = gdk_screen_height();
+    }
+    compute_layout(alloc.width, alloc.height);
+
+    if (gdk_window) {
+        cairo_t* cr = gdk_cairo_create(gdk_window);
+        if (cr) {
+            draw_loading(cr, alloc.width, alloc.height);
+            cairo_destroy(cr);
+        }
+    }
+
+    gtk_widget_queue_draw(window_);
+    while (gtk_events_pending()) gtk_main_iteration_do(FALSE);
+    app_log("splash: loading screen painted");
 }
 
 int TileWordsApp::run() {
@@ -600,6 +649,10 @@ gboolean TileWordsApp::on_key(GtkWidget*, GdkEventKey* event, gpointer data) {
 
 gboolean TileWordsApp::on_focus_out(GtkWidget*, GdkEventFocus*, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
+    if (app && app->loading_) {
+        app_log("lifecycle: focus-out during loading; save skipped");
+        return FALSE;
+    }
     app_log("lifecycle: focus-out; safe save");
     app->save_game();
     return FALSE;
@@ -607,6 +660,16 @@ gboolean TileWordsApp::on_focus_out(GtkWidget*, GdkEventFocus*, gpointer data) {
 
 gboolean TileWordsApp::on_visibility(GtkWidget*, GdkEventVisibility* event, gpointer data) {
     auto* app = static_cast<TileWordsApp*>(data);
+    if (app && app->loading_) {
+        if (event) {
+            std::ostringstream ss;
+            ss << "lifecycle: visibility-state=" << static_cast<int>(event->state) << "; loading; save skipped";
+            app_log(ss.str());
+        } else {
+            app_log("lifecycle: visibility event during loading; save skipped");
+        }
+        return FALSE;
+    }
     if (event) {
         std::ostringstream ss;
         ss << "lifecycle: visibility-state=" << static_cast<int>(event->state) << "; safe save";
@@ -758,6 +821,10 @@ void TileWordsApp::log_grid_metrics(const char* reason, int w, int h) {
     app_log(ss.str());
 }
 void TileWordsApp::draw(cairo_t* cr, int w, int h) {
+    if (loading_) {
+        draw_loading(cr, w, h);
+        return;
+    }
     fill_rect(cr, {0,0,w,h}, 1.0);
     switch (game_.mode) {
         case Mode::Handoff: draw_handoff(cr, w, h); break;
@@ -769,6 +836,27 @@ void TileWordsApp::draw(cairo_t* cr, int w, int h) {
         case Mode::Settings: draw_settings(cr, w, h); break;
         case Mode::Normal: default: draw_normal(cr, w, h); break;
     }
+}
+
+
+void TileWordsApp::draw_loading(cairo_t* cr, int w, int h) {
+    fill_rect(cr, {0, 0, w, h}, 1.0);
+
+    int title_h = std::max(110, h / 10);
+    Rect title{0, h / 2 - title_h - 40, w, title_h};
+    centered_text(cr, title, "TileWords", std::max(54, h / 17), 0.0, true);
+
+    Rect subtitle{0, title.y + title.h + 4, w, std::max(60, h / 22)};
+    centered_text(cr, subtitle, "Loading dictionary...", std::max(30, h / 34), 0.0, false);
+
+    Rect note{w / 10, subtitle.y + subtitle.h + 30, w * 8 / 10, std::max(48, h / 36)};
+    centered_text(cr, note, "Please wait", std::max(24, h / 44), 0.0, false);
+
+    int bar_w = std::min(w * 2 / 3, 620);
+    int bar_h = std::max(20, h / 70);
+    Rect bar{(w - bar_w) / 2, note.y + note.h + 30, bar_w, bar_h};
+    stroke_rect(cr, bar, 0.0, 2.0);
+    fill_rect(cr, {bar.x + 4, bar.y + 4, std::max(8, bar.w / 3), std::max(4, bar.h - 8)}, 0.0);
 }
 
 void TileWordsApp::draw_normal(cairo_t* cr, int w, int h) {
