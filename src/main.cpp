@@ -104,6 +104,7 @@ struct Game {
     int pass_count = 0;
     bool game_over = false;
     bool ai_enabled = false;
+    int cpu_difficulty = 1; // 0=easy, 1=normal, 2=hard
     int tile_scale = 100;
     int board_cell_tune = 0; // per-cell board size adjustment saved per device
     int tile_limit_option = 100;
@@ -266,6 +267,15 @@ static std::string pad3(int n) {
     if (n < 10) return "00" + std::to_string(n);
     if (n < 100) return "0" + std::to_string(n);
     return std::to_string(n);
+}
+
+static const char* cpu_difficulty_name(int d) {
+    switch (d) {
+        case 0: return "EASY";
+        case 2: return "HARD";
+        case 1:
+        default: return "NORMAL";
+    }
 }
 
 static bool ends_with_ci(const std::string& s, const std::string& suffix) {
@@ -680,28 +690,28 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.popup_yes = {w / 2 - 190, h * 62 / 100, 170, 70};
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
 
-    int settings_w2 = std::min(w * 4 / 5, 700);
-    int settings_h = std::min(h * 36 / 100, 360);
+    int settings_w2 = std::min(w * 4 / 5, 760);
+    int settings_h = std::min(h * 42 / 100, 440);
     int settings_x = (w - settings_w2) / 2;
     int settings_y = (h - settings_h) / 2;
     int inner_x = settings_x + 50;
     int inner_w = settings_w2 - 100;
     int settings_btn_h = std::max(58, h / 19);
-    int settings_gap = 22;
-    int grid_y = settings_y + 112;
+    int settings_gap = 20;
+    int grid_y = settings_y + 106;
     int grid_gap = 12;
     int side_w = std::max(126, inner_w / 4);
     int mid_w = inner_w - side_w * 2 - grid_gap * 2;
 
-    // Settings is intentionally small now: only user-facing grid sizing
-    // controls remain here. CPU selection lives in New Game Setup.
-    layout_.btn_settings_ai = {0, 0, 0, 0};
     layout_.btn_settings_minus = {inner_x, grid_y, side_w, settings_btn_h};
     layout_.btn_settings_grid_value = {inner_x + side_w + grid_gap, grid_y, mid_w, settings_btn_h};
     layout_.btn_settings_plus = {layout_.btn_settings_grid_value.x + mid_w + grid_gap, grid_y, side_w, settings_btn_h};
-    layout_.btn_settings_placeholder1 = {0, 0, 0, 0};
-    layout_.btn_settings_placeholder2 = {0, 0, 0, 0};
-    layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 110, grid_y + settings_btn_h + settings_gap + 12, 220, settings_btn_h};
+
+    int cpu_y = grid_y + settings_btn_h + settings_gap;
+    layout_.btn_settings_placeholder1 = {inner_x, cpu_y, side_w, settings_btn_h};
+    layout_.btn_settings_ai = {inner_x + side_w + grid_gap, cpu_y, mid_w, settings_btn_h};
+    layout_.btn_settings_placeholder2 = {layout_.btn_settings_ai.x + mid_w + grid_gap, cpu_y, side_w, settings_btn_h};
+    layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 110, cpu_y + settings_btn_h + settings_gap + 12, 220, settings_btn_h};
 
     int setup_w = std::min(w * 78 / 100, 780);
     int setup_h = std::min(h * 74 / 100, 780);
@@ -1007,8 +1017,8 @@ void TileWordsApp::draw_game_over(cairo_t* cr, int w, int h) {
 void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
 
-    int box_w = std::min(w * 4 / 5, 680);
-    int box_h = std::min(h * 36 / 100, 360);
+    int box_w = std::min(w * 4 / 5, 740);
+    int box_h = std::min(h * 42 / 100, 440);
     Rect box{(w - box_w) / 2, (h - box_h) / 2, box_w, box_h};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
@@ -1020,6 +1030,11 @@ void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
     gs << "GRID: " << layout_.cell << " px";
     draw_button(cr, layout_.btn_settings_grid_value, gs.str());
     draw_button(cr, layout_.btn_settings_plus, "GRID +");
+
+    draw_button(cr, layout_.btn_settings_placeholder1, "CPU -");
+    std::string cpu_label = std::string("CPU: ") + cpu_difficulty_name(game_.cpu_difficulty);
+    draw_button(cr, layout_.btn_settings_ai, cpu_label);
+    draw_button(cr, layout_.btn_settings_placeholder2, "CPU +");
 
     draw_button(cr, layout_.btn_settings_back, "BACK");
 }
@@ -1242,6 +1257,20 @@ void TileWordsApp::touch_settings(int x, int y) {
         game_.board_cell_tune = std::min(12, game_.board_cell_tune + 1);
         save_game();
         log_grid_metrics("grid-plus", gdk_screen_width(), gdk_screen_height());
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.btn_settings_placeholder1, x, y)) {
+        game_.cpu_difficulty = std::max(0, game_.cpu_difficulty - 1);
+        save_game();
+        app_log(std::string("settings: cpu difficulty=") + cpu_difficulty_name(game_.cpu_difficulty));
+        queue_draw();
+        return;
+    }
+    if (in_rect(layout_.btn_settings_placeholder2, x, y) || in_rect(layout_.btn_settings_ai, x, y)) {
+        game_.cpu_difficulty = std::min(2, game_.cpu_difficulty + 1);
+        save_game();
+        app_log(std::string("settings: cpu difficulty=") + cpu_difficulty_name(game_.cpu_difficulty));
         queue_draw();
         return;
     }
@@ -1632,6 +1661,7 @@ void TileWordsApp::save_game() {
     out << "  \"handoff\": " << (game_.mode == Mode::Handoff ? 1 : 0) << ",\n";
     out << "  \"game_over\": " << (game_.game_over ? 1 : 0) << ",\n";
     out << "  \"ai_enabled\": " << (game_.ai_enabled ? 1 : 0) << ",\n";
+    out << "  \"cpu_difficulty\": " << game_.cpu_difficulty << ",\n";
     out << "  \"tile_scale\": " << game_.tile_scale << ",\n";
     out << "  \"board_cell_tune\": " << game_.board_cell_tune << ",\n";
     out << "  \"tile_limit_option\": " << game_.tile_limit_option << ",\n";
@@ -1691,6 +1721,7 @@ bool TileWordsApp::load_game() {
     loaded.setup_cpu = loaded.cpu;
     loaded.game_over = json_int_value(src, "game_over", 0) != 0;
     loaded.ai_enabled = json_int_value(src, "ai_enabled", 0) != 0;
+    loaded.cpu_difficulty = std::max(0, std::min(2, json_int_value(src, "cpu_difficulty", 1)));
     loaded.tile_scale = std::max(80, std::min(140, json_int_value(src, "tile_scale", 100)));
     loaded.board_cell_tune = std::max(-12, std::min(12, json_int_value(src, "board_cell_tune", 0)));
     loaded.tile_limit_option = json_int_value(src, "tile_limit_option", 100);
@@ -2105,6 +2136,8 @@ CpuMove TileWordsApp::find_cpu_move(int time_limit_ms) const {
     int checked = 0;
     int legal = 0;
     int candidate_words = 0;
+    std::vector<CpuMove> legal_moves;
+    legal_moves.reserve(512);
 
     auto timed_out = [&]() {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time).count();
@@ -2168,6 +2201,7 @@ CpuMove TileWordsApp::find_cpu_move(int time_limit_ms) const {
         ++checked;
         if (evaluate_cpu_placement(word, sr, sc, dr, dc, move)) {
             ++legal;
+            if (legal_moves.size() < 4096) legal_moves.push_back(move);
             if (!best.ok || move.score > best.score || (move.score == best.score && move.word.size() > best.word.size())) {
                 best = move;
                 best.ok = true;
@@ -2250,12 +2284,49 @@ CpuMove TileWordsApp::find_cpu_move(int time_limit_ms) const {
         }
     }
 
+    CpuMove selected = best;
+    if (best.ok && game_.cpu_difficulty < 2 && !legal_moves.empty()) {
+        std::sort(legal_moves.begin(), legal_moves.end(), [](const CpuMove& a, const CpuMove& b) {
+            if (a.score != b.score) return a.score < b.score;
+            return a.word.size() < b.word.size();
+        });
+
+        if (game_.cpu_difficulty == 0) {
+            // Easy intentionally avoids the highest-scoring plays. It still makes
+            // legal connected moves, but prefers smaller, human-friendly scores.
+            int cap = std::max(10, std::min(26, best.score / 2));
+            selected = legal_moves.front();
+            for (const CpuMove& m : legal_moves) {
+                if (m.score <= cap) selected = m;
+                else break;
+            }
+        } else {
+            // Normal is competitive but not ruthless: it usually chooses a strong
+            // move below the absolute best move, leaving Hard as the killer mode.
+            int cap = std::max(18, best.score * 72 / 100);
+            selected = legal_moves.back();
+            for (const CpuMove& m : legal_moves) {
+                if (m.score <= cap) selected = m;
+                else break;
+            }
+            if (selected.score < 12 && best.score <= 24) selected = best;
+        }
+        selected.ok = true;
+    }
+
     std::ostringstream ss;
-    ss << "cpu: search rack=" << rack_string() << " candidates=" << candidate_words << " checked=" << checked << " legal=" << legal;
-    if (best.ok) ss << " best=" << best.word << " score=" << best.score << " tiles=" << best.placements.size();
-    else ss << " no-move";
+    ss << "cpu: search difficulty=" << cpu_difficulty_name(game_.cpu_difficulty)
+       << " rack=" << rack_string() << " candidates=" << candidate_words
+       << " checked=" << checked << " legal=" << legal;
+    if (best.ok) {
+        ss << " best=" << best.word << " score=" << best.score
+           << " selected=" << selected.word << " selected_score=" << selected.score
+           << " tiles=" << selected.placements.size();
+    } else {
+        ss << " no-move";
+    }
     app_log(ss.str());
-    return best;
+    return selected;
 }
 
 void TileWordsApp::cpu_exchange_or_pass() {
@@ -2304,9 +2375,10 @@ void TileWordsApp::run_cpu_turn() {
     if (!game_.cpu[game_.current] || game_.game_over) return;
     return_unsubmitted_tiles_to_rack();
     game_.selected_rack = -1;
-    app_log("cpu: begin player " + std::to_string(game_.current + 1));
+    app_log("cpu: begin player " + std::to_string(game_.current + 1) + " difficulty=" + cpu_difficulty_name(game_.cpu_difficulty));
 
-    CpuMove move = find_cpu_move(4500);
+    int time_limit = (game_.cpu_difficulty == 0) ? 1800 : (game_.cpu_difficulty == 1 ? 3200 : 5200);
+    CpuMove move = find_cpu_move(time_limit);
     if (move.ok) {
         for (const auto& p : move.placements) {
             if (p.rack_index >= 0 && p.rack_index < RACK_N) {
