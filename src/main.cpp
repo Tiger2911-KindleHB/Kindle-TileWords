@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <chrono>
 #include <fstream>
 #include <csignal>
 #include <dirent.h>
@@ -70,6 +71,21 @@ struct MoveResult {
     int score = 0;
     std::string message;
     std::string word;
+};
+
+struct CpuPlacement {
+    int row = 0;
+    int col = 0;
+    int rack_index = -1;
+    char ch = 0;
+    bool blank = false;
+};
+
+struct CpuMove {
+    bool ok = false;
+    int score = 0;
+    std::string word;
+    std::vector<CpuPlacement> placements;
 };
 
 struct Game {
@@ -145,6 +161,7 @@ private:
     Game game_;
     Layout layout_;
     std::set<std::string> dictionary_;
+    std::vector<std::string> dictionary_words_;
     std::string home_;
     std::string save_path_;
     std::string dict_path_;
@@ -209,6 +226,11 @@ private:
     int preview_score() const;
     void reject(const std::string& msg);
     void submit_move();
+    void run_cpu_turn();
+    CpuMove find_cpu_move(int time_limit_ms = 4500) const;
+    bool evaluate_cpu_placement(const std::string& word, int row, int col, int dr, int dc, CpuMove& out) const;
+    int score_cpu_cells(const std::vector<std::pair<int,int>>& cells, const CpuMove& move) const;
+    void cpu_exchange_or_pass();
     MoveResult validate_and_score();
     void lock_placed_and_score(int score, const std::string& word);
     void return_temp_tile(int row, int col);
@@ -659,29 +681,27 @@ void TileWordsApp::compute_layout(int w, int h) {
     layout_.popup_no = {w / 2 + 20, h * 62 / 100, 170, 70};
 
     int settings_w2 = std::min(w * 4 / 5, 700);
-    int settings_h = std::min(h * 56 / 100, 520);
+    int settings_h = std::min(h * 36 / 100, 360);
     int settings_x = (w - settings_w2) / 2;
     int settings_y = (h - settings_h) / 2;
     int inner_x = settings_x + 50;
     int inner_w = settings_w2 - 100;
-    int settings_btn_h = std::max(54, h / 20);
-    int settings_gap = 16;
-    int first_y = settings_y + 88;
-
-    layout_.btn_settings_ai = {inner_x, first_y, inner_w, settings_btn_h};
-    int grid_y = first_y + settings_btn_h + settings_gap;
+    int settings_btn_h = std::max(58, h / 19);
+    int settings_gap = 22;
+    int grid_y = settings_y + 112;
     int grid_gap = 12;
     int side_w = std::max(126, inner_w / 4);
     int mid_w = inner_w - side_w * 2 - grid_gap * 2;
+
+    // Settings is intentionally small now: only user-facing grid sizing
+    // controls remain here. CPU selection lives in New Game Setup.
+    layout_.btn_settings_ai = {0, 0, 0, 0};
     layout_.btn_settings_minus = {inner_x, grid_y, side_w, settings_btn_h};
     layout_.btn_settings_grid_value = {inner_x + side_w + grid_gap, grid_y, mid_w, settings_btn_h};
     layout_.btn_settings_plus = {layout_.btn_settings_grid_value.x + mid_w + grid_gap, grid_y, side_w, settings_btn_h};
-
-    int half_w = (inner_w - settings_gap) / 2;
-    int future_y = grid_y + settings_btn_h + settings_gap;
-    layout_.btn_settings_placeholder1 = {inner_x, future_y, half_w, settings_btn_h};
-    layout_.btn_settings_placeholder2 = {inner_x + half_w + settings_gap, future_y, half_w, settings_btn_h};
-    layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 100, future_y + settings_btn_h + settings_gap + 8, 200, settings_btn_h};
+    layout_.btn_settings_placeholder1 = {0, 0, 0, 0};
+    layout_.btn_settings_placeholder2 = {0, 0, 0, 0};
+    layout_.btn_settings_back = {settings_x + settings_w2 / 2 - 110, grid_y + settings_btn_h + settings_gap + 12, 220, settings_btn_h};
 
     int setup_w = std::min(w * 78 / 100, 780);
     int setup_h = std::min(h * 74 / 100, 780);
@@ -920,7 +940,10 @@ void TileWordsApp::draw_exchange(cairo_t* cr, int w, int h) {
     (void)h;
     draw_normal(cr, w, h);
     // Keep exchange mode visually clean: selected rack tiles get an outline, with no
-    // instruction text overlaying the rack or bottom controls.
+    // instruction text overlaying the rack or bottom controls. Redraw only the
+    // Exchange button when entering this mode so the Kindle does not do a full
+    // screen refresh just because Exchange was tapped.
+    draw_button(cr, layout_.btn_exchange, "EXCHANGE", true);
     for (int i = 0; i < RACK_N; ++i) {
         if (game_.exchange_selected[i]) stroke_rect(cr, layout_.rack[i], 0.0, 7.0);
     }
@@ -985,26 +1008,18 @@ void TileWordsApp::draw_settings(cairo_t* cr, int w, int h) {
     draw_normal(cr, w, h);
 
     int box_w = std::min(w * 4 / 5, 680);
-    int box_h = std::min(h * 58 / 100, 500);
+    int box_h = std::min(h * 36 / 100, 360);
     Rect box{(w - box_w) / 2, (h - box_h) / 2, box_w, box_h};
     fill_rect(cr, box, 1.0);
     stroke_rect(cr, box, 0.0, 4.0);
 
-    centered_text(cr, {box.x, box.y + 22, box.w, 52}, "SETTINGS", 34, 0.0, true);
-    draw_button(cr, layout_.btn_settings_ai, game_.ai_enabled ? "AI OPPONENT: ON" : "AI OPPONENT: OFF");
+    centered_text(cr, {box.x, box.y + 24, box.w, 58}, "SETTINGS", 36, 0.0, true);
 
     draw_button(cr, layout_.btn_settings_minus, "GRID -");
     std::ostringstream gs;
     gs << "GRID: " << layout_.cell << " px";
     draw_button(cr, layout_.btn_settings_grid_value, gs.str());
     draw_button(cr, layout_.btn_settings_plus, "GRID +");
-    fill_rect(cr, layout_.btn_settings_placeholder1, 0.93);
-    stroke_rect(cr, layout_.btn_settings_placeholder1, 0.0, 3.0);
-    centered_text(cr, layout_.btn_settings_placeholder1, "FUTURE 1", std::max(18.0, layout_.btn_settings_placeholder1.h * 0.38), 0.45, true);
-
-    fill_rect(cr, layout_.btn_settings_placeholder2, 0.93);
-    stroke_rect(cr, layout_.btn_settings_placeholder2, 0.0, 3.0);
-    centered_text(cr, layout_.btn_settings_placeholder2, "FUTURE 2", std::max(18.0, layout_.btn_settings_placeholder2.h * 0.38), 0.45, true);
 
     draw_button(cr, layout_.btn_settings_back, "BACK");
 }
@@ -1031,7 +1046,12 @@ void TileWordsApp::touch(int x, int y) {
 void TileWordsApp::touch_normal(int x, int y) {
     if (in_rect(layout_.btn_submit, x, y)) { submit_move(); queue_draw(); return; }
     if (in_rect(layout_.btn_pass, x, y)) { pass_turn(); queue_draw(); return; }
-    if (in_rect(layout_.btn_exchange, x, y)) { game_.mode = Mode::Exchange; game_.exchange_selected.fill(false); queue_draw(); return; }
+    if (in_rect(layout_.btn_exchange, x, y)) {
+        game_.mode = Mode::Exchange;
+        game_.exchange_selected.fill(false);
+        queue_draw_rect(layout_.btn_exchange);
+        return;
+    }
     if (in_rect(layout_.btn_shuffle, x, y)) { shuffle_rack(); save_game(); queue_draw_rack(); return; }
 
     for (int i = 0; i < RACK_N; ++i) {
@@ -1088,14 +1108,25 @@ void TileWordsApp::touch_normal(int x, int y) {
 
 void TileWordsApp::touch_handoff(int x, int y) {
     if (in_rect(layout_.confirm_button, x, y)) {
-        game_.mode = Mode::Normal;
-        save_game();
+        if (game_.cpu[game_.current]) {
+            game_.mode = Mode::Normal;
+            run_cpu_turn();
+        } else {
+            game_.mode = Mode::Normal;
+            save_game();
+        }
         queue_draw();
     }
 }
 
 void TileWordsApp::touch_exchange(int x, int y) {
-    if (in_rect(layout_.btn_pass, x, y)) { game_.mode = Mode::Normal; queue_draw(); return; }
+    if (in_rect(layout_.btn_pass, x, y)) {
+        game_.mode = Mode::Normal;
+        game_.exchange_selected.fill(false);
+        queue_draw_rect(layout_.btn_exchange);
+        queue_draw_rack();
+        return;
+    }
     if (in_rect(layout_.btn_submit, x, y)) { exchange_tiles(); queue_draw(); return; }
     for (int i = 0; i < RACK_N; ++i) {
         if (in_rect(layout_.rack[i], x, y) && game_.racks[game_.current][i].ch) {
@@ -1200,7 +1231,6 @@ void TileWordsApp::touch_new_setup(int x, int y) {
 
 void TileWordsApp::touch_settings(int x, int y) {
     if (in_rect(layout_.btn_settings_back, x, y)) { game_.mode = Mode::Normal; save_game(); queue_draw(); return; }
-    if (in_rect(layout_.btn_settings_ai, x, y)) { game_.ai_enabled = !game_.ai_enabled; save_game(); queue_draw(); return; }
     if (in_rect(layout_.btn_settings_minus, x, y)) {
         game_.board_cell_tune = std::max(-12, game_.board_cell_tune - 1);
         save_game();
@@ -1434,7 +1464,7 @@ void TileWordsApp::new_game(bool reset_scores) {
     place_starter_letters();
 
     for (int p = 0; p < game_.player_count; ++p) refill_rack(p);
-    game_.mode = Mode::Normal;
+    game_.mode = game_.cpu[game_.current] ? Mode::Handoff : Mode::Normal;
     save_game();
 }
 
@@ -1446,6 +1476,7 @@ void TileWordsApp::refill_rack(int player) {
 
 void TileWordsApp::load_dictionary() {
     dictionary_.clear();
+    dictionary_words_.clear();
 
     std::vector<std::string> candidates;
     auto add_candidate = [&](const std::string& path) {
@@ -1540,6 +1571,20 @@ void TileWordsApp::load_dictionary() {
                 " unique words from " + path);
     }
 
+    dictionary_words_.assign(dictionary_.begin(), dictionary_.end());
+    std::sort(dictionary_words_.begin(), dictionary_words_.end(), [](const std::string& a, const std::string& b) {
+        auto value_sum = [](const std::string& w) {
+            int s = 0;
+            for (char ch : w) s += letter_value(ch);
+            return s;
+        };
+        int av = value_sum(a);
+        int bv = value_sum(b);
+        if (av != bv) return av > bv;
+        if (a.size() != b.size()) return a.size() > b.size();
+        return a < b;
+    });
+
     if (files_loaded == 0) {
         app_log("dictionary: no dictionary txt file found in data folders; expected " + dict_path_);
     } else {
@@ -1547,7 +1592,8 @@ void TileWordsApp::load_dictionary() {
                 " unique words from " + std::to_string(files_loaded) +
                 " file(s), " + std::to_string(total_lines) +
                 " lines; TOOK=" + (dictionary_.find("TOOK") != dictionary_.end() ? "yes" : "no") +
-                "; ALL=" + (dictionary_.find("ALL") != dictionary_.end() ? "yes" : "no"));
+                "; ALL=" + (dictionary_.find("ALL") != dictionary_.end() ? "yes" : "no") +
+                "; cpu_words=" + std::to_string(dictionary_words_.size()));
     }
 }
 
@@ -1892,6 +1938,289 @@ int TileWordsApp::preview_score() const {
     }
     if (placed.size() == RACK_N && total > 0) total += BINGO_BONUS;
     return total;
+}
+
+
+static char cpu_move_letter_at(const CpuMove& move, int row, int col, bool* blank_out = nullptr, bool* placed_out = nullptr) {
+    for (const auto& p : move.placements) {
+        if (p.row == row && p.col == col) {
+            if (blank_out) *blank_out = p.blank;
+            if (placed_out) *placed_out = true;
+            return p.ch;
+        }
+    }
+    if (blank_out) *blank_out = false;
+    if (placed_out) *placed_out = false;
+    return 0;
+}
+
+bool TileWordsApp::evaluate_cpu_placement(const std::string& raw_word, int row, int col, int dr, int dc, CpuMove& out) const {
+    const std::string word = upper_word(raw_word);
+    const int len = static_cast<int>(word.size());
+    if (len < 2 || len > BOARD_N) return false;
+    int end_r = row + dr * (len - 1);
+    int end_c = col + dc * (len - 1);
+    if (row < 0 || row >= BOARD_N || col < 0 || col >= BOARD_N || end_r < 0 || end_r >= BOARD_N || end_c < 0 || end_c >= BOARD_N) return false;
+
+    int before_r = row - dr;
+    int before_c = col - dc;
+    int after_r = end_r + dr;
+    int after_c = end_c + dc;
+    if (before_r >= 0 && before_r < BOARD_N && before_c >= 0 && before_c < BOARD_N && game_.board[before_r][before_c].ch) return false;
+    if (after_r >= 0 && after_r < BOARD_N && after_c >= 0 && after_c < BOARD_N && game_.board[after_r][after_c].ch) return false;
+
+    CpuMove candidate;
+    candidate.word = word;
+    std::array<bool, RACK_N> used{};
+    bool connected = false;
+    const bool first_move = locked_count() == 0;
+    bool covers_center = false;
+
+    auto take_rack_tile = [&](char need, int& rack_index, bool& blank) -> bool {
+        for (int i = 0; i < RACK_N; ++i) {
+            if (used[i]) continue;
+            const Tile& t = game_.racks[game_.current][i];
+            if (!t.ch || t.blank || t.ch == '?') continue;
+            if (std::toupper(static_cast<unsigned char>(t.ch)) == need) {
+                used[i] = true;
+                rack_index = i;
+                blank = false;
+                return true;
+            }
+        }
+        for (int i = 0; i < RACK_N; ++i) {
+            if (used[i]) continue;
+            const Tile& t = game_.racks[game_.current][i];
+            if (t.ch == '?' || t.blank) {
+                used[i] = true;
+                rack_index = i;
+                blank = true;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (int i = 0; i < len; ++i) {
+        int r = row + dr * i;
+        int c = col + dc * i;
+        char need = word[i];
+        const Cell& cell = game_.board[r][c];
+        if (r == 7 && c == 7) covers_center = true;
+        if (cell.ch) {
+            if (!cell.locked) return false;
+            if (std::toupper(static_cast<unsigned char>(cell.ch)) != need) return false;
+            connected = true;
+        } else {
+            int rack_idx = -1;
+            bool use_blank = false;
+            if (!take_rack_tile(need, rack_idx, use_blank)) return false;
+            candidate.placements.push_back(CpuPlacement{r, c, rack_idx, need, use_blank});
+        }
+    }
+
+    if (candidate.placements.empty()) return false;
+    if (candidate.placements.size() > RACK_N) return false;
+    if (first_move && !covers_center) return false;
+
+    auto get_ch = [&](int r, int c) -> char {
+        if (r < 0 || r >= BOARD_N || c < 0 || c >= BOARD_N) return 0;
+        if (game_.board[r][c].ch) return game_.board[r][c].ch;
+        return cpu_move_letter_at(candidate, r, c);
+    };
+
+    auto collect_cells = [&](int r, int c, int adr, int adc) {
+        while (get_ch(r - adr, c - adc)) { r -= adr; c -= adc; }
+        std::vector<std::pair<int,int>> cells;
+        while (get_ch(r, c)) { cells.push_back({r, c}); r += adr; c += adc; }
+        return cells;
+    };
+
+    // Main word is being generated from dictionary; still check to protect custom word-list cases.
+    if (!is_dictionary_word(word)) return false;
+    int total = 0;
+    std::vector<std::pair<int,int>> main_cells;
+    for (int i = 0; i < len; ++i) main_cells.push_back({row + dr * i, col + dc * i});
+    total += score_cpu_cells(main_cells, candidate);
+
+    const int cross_dr = dc;
+    const int cross_dc = dr;
+    for (const auto& p : candidate.placements) {
+        auto cross = collect_cells(p.row, p.col, cross_dr, cross_dc);
+        if (cross.size() > 1) {
+            connected = true;
+            std::string cross_word;
+            for (auto [rr, cc] : cross) cross_word.push_back(get_ch(rr, cc));
+            if (!is_dictionary_word(cross_word)) return false;
+            total += score_cpu_cells(cross, candidate);
+        }
+    }
+
+    if (!first_move && !connected) return false;
+    if (candidate.placements.size() == RACK_N) total += BINGO_BONUS;
+
+    candidate.score = total;
+    out = candidate;
+    return total > 0;
+}
+
+int TileWordsApp::score_cpu_cells(const std::vector<std::pair<int,int>>& cells, const CpuMove& move) const {
+    int sum = 0;
+    int word_multiplier = 1;
+    for (auto [r, c] : cells) {
+        bool placed = false;
+        bool move_blank = false;
+        char move_ch = cpu_move_letter_at(move, r, c, &move_blank, &placed);
+        int val = 0;
+        if (placed) {
+            val = move_blank ? 0 : letter_value(move_ch);
+            Premium p = cell_premium(r, c);
+            if (p == Premium::DL) val *= 2;
+            else if (p == Premium::TL) val *= 3;
+            else if (p == Premium::DW || p == Premium::Star) word_multiplier *= 2;
+            else if (p == Premium::TW) word_multiplier *= 3;
+        } else {
+            const Cell& cell = game_.board[r][c];
+            val = cell.blank ? 0 : letter_value(cell.ch);
+        }
+        sum += val;
+    }
+    return sum * word_multiplier;
+}
+
+CpuMove TileWordsApp::find_cpu_move(int time_limit_ms) const {
+    CpuMove best;
+    if (dictionary_words_.empty()) return best;
+
+    const bool first_move = locked_count() == 0;
+    const auto start_time = std::chrono::steady_clock::now();
+    int checked = 0;
+    int legal = 0;
+
+    auto timed_out = [&]() {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time).count();
+        return elapsed >= time_limit_ms;
+    };
+
+    std::vector<std::pair<int,int>> anchors;
+    if (first_move) {
+        anchors.push_back({7, 7});
+    } else {
+        bool seen[BOARD_N][BOARD_N] = {};
+        const int d4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        for (int r = 0; r < BOARD_N; ++r) {
+            for (int c = 0; c < BOARD_N; ++c) {
+                if (game_.board[r][c].locked) {
+                    if (!seen[r][c]) { anchors.push_back({r,c}); seen[r][c] = true; }
+                    for (auto& d : d4) {
+                        int rr = r + d[0], cc = c + d[1];
+                        if (rr >= 0 && rr < BOARD_N && cc >= 0 && cc < BOARD_N && !game_.board[rr][cc].ch && !seen[rr][cc]) {
+                            anchors.push_back({rr, cc});
+                            seen[rr][cc] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (const std::string& word : dictionary_words_) {
+        const int len = static_cast<int>(word.size());
+        if (len < 2 || len > BOARD_N) continue;
+        if ((checked & 1023) == 0 && timed_out()) break;
+
+        for (auto [ar, ac] : anchors) {
+            for (int dir = 0; dir < 2; ++dir) {
+                int dr = dir == 0 ? 0 : 1;
+                int dc = dir == 0 ? 1 : 0;
+                for (int wi = 0; wi < len; ++wi) {
+                    if (!first_move && game_.board[ar][ac].ch && std::toupper(static_cast<unsigned char>(game_.board[ar][ac].ch)) != word[wi]) continue;
+                    int sr = ar - dr * wi;
+                    int sc = ac - dc * wi;
+                    CpuMove move;
+                    ++checked;
+                    if (evaluate_cpu_placement(word, sr, sc, dr, dc, move)) {
+                        ++legal;
+                        if (!best.ok || move.score > best.score || (move.score == best.score && move.word.size() > best.word.size())) {
+                            best = move;
+                            best.ok = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::ostringstream ss;
+    ss << "cpu: search checked=" << checked << " legal=" << legal;
+    if (best.ok) ss << " best=" << best.word << " score=" << best.score << " tiles=" << best.placements.size();
+    else ss << " no-move";
+    app_log(ss.str());
+    return best;
+}
+
+void TileWordsApp::cpu_exchange_or_pass() {
+    if (!game_.bag.empty()) {
+        auto& rack = game_.racks[game_.current];
+        int exchanged = 0;
+        for (int i = 0; i < RACK_N; ++i) {
+            if (!rack[i].ch) continue;
+            char ch = rack[i].ch;
+            bool keep = (ch == '?' || ch == 'S' || ch == 'X' || ch == 'Z' || ch == 'Q' || letter_value(ch) >= 4);
+            if (keep && exchanged >= 3) continue;
+            if (!keep || exchanged < 5) {
+                game_.bag.push_back(rack[i]);
+                rack[i] = draw_tile();
+                ++exchanged;
+                if (exchanged >= 5) break;
+            }
+        }
+        if (exchanged > 0) {
+            game_.last_turn_player = game_.current;
+            game_.last_turn_score = 0;
+            game_.last_turn_word = "EXCHANGE";
+            game_.pass_count = 0;
+            app_log("cpu: exchanged " + std::to_string(exchanged) + " tile(s)");
+            advance_to_next_player();
+            enter_handoff();
+            return;
+        }
+    }
+
+    game_.last_turn_player = game_.current;
+    game_.last_turn_score = 0;
+    game_.last_turn_word = "PASS";
+    ++game_.pass_count;
+    app_log("cpu: passed");
+    if (game_.pass_count >= game_.player_count * 3) {
+        game_.game_over = true;
+        game_.mode = Mode::GameOver;
+    } else {
+        advance_to_next_player();
+        enter_handoff();
+    }
+}
+
+void TileWordsApp::run_cpu_turn() {
+    if (!game_.cpu[game_.current] || game_.game_over) return;
+    return_unsubmitted_tiles_to_rack();
+    game_.selected_rack = -1;
+    app_log("cpu: begin player " + std::to_string(game_.current + 1));
+
+    CpuMove move = find_cpu_move(4500);
+    if (move.ok) {
+        for (const auto& p : move.placements) {
+            if (p.rack_index >= 0 && p.rack_index < RACK_N) {
+                game_.racks[game_.current][p.rack_index] = Tile{};
+            }
+            game_.board[p.row][p.col] = Cell{p.ch, false, p.blank, p.rack_index};
+        }
+        lock_placed_and_score(move.score, move.word);
+        app_log("cpu: played " + move.word + " for " + std::to_string(move.score));
+    } else {
+        cpu_exchange_or_pass();
+    }
+    save_game();
 }
 
 MoveResult TileWordsApp::validate_and_score() {
